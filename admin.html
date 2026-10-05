@@ -2590,6 +2590,10 @@ function verImportar(){
           Sube el archivo <b>detalle_calificaciones.xls</b> que exporta el sistema.
           De ahí salen el periodo, las carreras, los grupos, los docentes, las
           asignaturas, los alumnos y las calificaciones.
+          <br><br>
+          <b>El archivo reemplaza todo lo académico:</b> lo que ya no venga en él
+          se retira del portal. No se tocan los datos que capturan los alumnos,
+          sus documentos, sus reportes ni su asistencia.
         </p>
 
         <div class="campo" style="margin-top:18px">
@@ -2876,6 +2880,18 @@ async function confirmarImportacion(e){
         <div class="par"><span>Calificaciones</span><b>${s.calificaciones}</b></div>
         <div class="par"><span>Nombres corregidos</span><b>${s.corregidos ?? 0}</b></div>
         <div class="par"><span>Docentes actualizados</span><b>${s.docentes_actualizados ?? 0}</b></div>
+      </div>
+
+      <p style="font-size:13px;font-weight:600;margin:18px 0 10px">Lo que se retiró</p>
+      <p style="font-size:12.5px;color:var(--texto-suave);max-width:66ch;margin-bottom:12px">
+        El archivo manda sobre lo académico: lo que ya no aparece en él se quita.
+        Los datos del alumno, su tutor, su salud, sus documentos, sus reportes y
+        sus inasistencias no se tocan.
+      </p>
+      <div class="pares">
+        <div class="par"><span>Asignaciones retiradas</span><b>${s.asignaciones_retiradas ?? 0}</b></div>
+        <div class="par"><span>Calificaciones retiradas</span><b>${s.calificaciones_retiradas ?? 0}</b></div>
+        <div class="par"><span>Materias sin grupo retiradas</span><b>${s.materias_retiradas ?? 0}</b></div>
       </div>
 
       ${(r.ausentes||[]).length ? `
