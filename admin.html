@@ -677,9 +677,12 @@ async function verTablero(){
         </p>
         ${r.por_docente.map(d => {
           const pc = d.total ? Math.round(100*d.reprobadas/d.total) : 0;
-          return `<div style="display:grid;grid-template-columns:1fr 130px 90px;gap:12px;align-items:center;margin-bottom:10px">
+          const color = pc >= 30 ? 'var(--rojo)' : pc >= 15 ? 'var(--ambar)' : 'var(--verde)';
+          return `<div style="display:grid;grid-template-columns:1fr 130px 56px 90px;gap:12px;align-items:center;margin-bottom:10px">
             <div style="font-size:13px">${escapar(d.docente)}</div>
-            ${barra(pc, 100, pc >= 30 ? 'var(--rojo)' : pc >= 15 ? 'var(--ambar)' : 'var(--verde)')}
+            ${barra(pc, 100, color)}
+            <div style="font-size:13px;text-align:right;font-variant-numeric:tabular-nums">
+              <b style="color:${color}">${pc}%</b></div>
             <div style="font-size:12.5px;text-align:right;color:var(--texto-suave)">
               ${d.reprobadas} de ${d.total}</div>
           </div>`;
