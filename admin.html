@@ -534,16 +534,45 @@ document.addEventListener('keydown', e => { if(e.key==='Escape') cerrarVentana()
    TABLERO
    ========================================================================== */
 async function verTablero(){
-  const r = await api('estadisticas');
+  const [r, rj, ra] = await Promise.all([
+    api('estadisticas'),
+    api('listar', {tabla:'jornadas', orden:'fecha', limite:400}),
+    api('listar', {tabla:'v_resumen_inasistencias', orden:'alumno', limite:2000})
+  ]);
   if(!r.ok) throw new Error(r.error);
   const e = r.estadisticas || {};
+
+  /* ASISTENCIA POR GRUPO
+     La estadística del servidor no la trae, porque la asistencia se registra
+     solo con inasistencias. Se calcula aquí: días que faltaron todos los
+     alumnos del grupo entre (alumnos del grupo × días cargados). Quien no
+     aparece en el resumen asistió todos los días. */
+  const diasCargados = rj.ok ? rj.datos.length : 0;
+  const claveGrupo = t => {
+    const m = String(t ?? '').toUpperCase().match(/(\d+)\D*?([A-Z])/);
+    return m ? m[1] + m[2] : String(t ?? '').toUpperCase();
+  };
+  const faltasPorGrupo = new Map();
+  for(const x of (ra.ok ? ra.datos : [])){
+    const dias = Number(x.dias_registrados) || 0;
+    if(!dias) continue;
+    const perdidos = dias * (1 - (Number(x.porcentaje_asistencia) || 0) / 100);
+    const k = claveGrupo(x.grupo);
+    faltasPorGrupo.set(k, (faltasPorGrupo.get(k) || 0) + perdidos);
+  }
+  const asistenciaDe = g => {
+    if(!diasCargados || !g.alumnos) return g.asistencia ?? null;
+    const perdidos = faltasPorGrupo.get(claveGrupo(g.grupo)) || 0;
+    return Math.max(0, Math.round(1000 * (1 - perdidos / (g.alumnos * diasCargados))) / 10);
+  };
 
   // La vista los entrega sin orden. Se ordenan por semestre, luego letra y
   // turno, para que salgan 1A 1B 1C 3A 3B 3C 5A 5B 5C, y el semestre que
   // viene 2A 2B 2C 4A 4B 4C 6A 6B 6C.
   const umbral = Number(r.umbral_riesgo ?? 3);
   const grupos = [...(r.por_grupo || [])].sort((a,b) =>
-    (a.semestre - b.semestre) || cmp(a.letra, b.letra) || cmp(a.turno, b.turno));
+    (a.semestre - b.semestre) || cmp(a.letra, b.letra) || cmp(a.turno, b.turno))
+    .map(g => ({...g, asistencia: asistenciaDe(g)}));
 
   const barra = (valor, max, color) => {
     const ancho = max ? Math.round(100 * valor / max) : 0;
@@ -573,12 +602,10 @@ async function verTablero(){
         <div class="v">${e.grupos_activos ?? 0}</div>
         <div class="n">${e.alumnos_activos ?? 0} alumnos inscritos</div></div>
       <div class="medidor"><div class="r">Docentes</div>
-        <div class="v">${e.docentes_activos ?? 0}</div>
-        <div class="n">${e.carreras_activas ?? 0} carreras</div></div>
+        <div class="v">${e.docentes_activos ?? 0}</div></div>
       <div class="medidor"><div class="r">Materias</div>
         <div class="v">${e.materias_distintas ?? e.materias_activas ?? 0}</div>
-        <div class="n">${e.materias_activas ?? 0} versiones por carrera · ${
-          e.asignaciones ?? 0} asignadas a grupos</div></div>
+        <div class="n">${e.materias_activas ?? 0} versiones por carrera</div></div>
       <div class="medidor ${e.docs_por_revisar ? 'alerta':''}"><div class="r">Documentos por revisar</div>
         <div class="v">${e.docs_por_revisar ?? 0}</div>
         <div class="n">${e.docs_aceptados ?? 0} aceptados</div></div>
@@ -628,7 +655,8 @@ async function verTablero(){
               <td class="n">${avanceCal}%<div style="margin-top:4px;width:56px">
                 ${barra(avanceCal,100,'var(--cian)')}</div></td>
               <td class="n">${g.asistencia !== null && g.asistencia !== undefined
-                ? g.asistencia + '%' : '—'}</td>
+                ? `<b style="color:${g.asistencia < 80 ? 'var(--rojo)' : g.asistencia < 90
+                    ? 'var(--ambar)' : 'var(--verde)'}">${g.asistencia}%</b>` : '—'}</td>
               <td class="n">${avanceDoc}%<div style="margin-top:4px;width:56px">
                 ${barra(avanceDoc,100,'var(--verde)')}</div></td>
             </tr>`;
@@ -2000,24 +2028,53 @@ async function verDocentes(){
 /* ==========================================================================
    MATERIAS POR GRUPO (asignaciones)
    ========================================================================== */
+// Grupo elegido en «Materias por grupo»; se conserva al guardar o quitar
+let grupoAsigElegido = null;
+
 async function verAsignaciones(){
   const r = await api('listar', {tabla:'grupo_materia', orden:'grupo_id', limite:1000});
   if(!r.ok) throw new Error(r.error);
   const filas = ordenarAsignaciones(r.datos);
 
+  // Grupos que existen, en orden (1A 1B 1C 3A …), con sus materias
+  const porGrupo = new Map((lookups.grupos || []).map(g => [g.id, []]));
+  filas.forEach(f => {
+    if(!porGrupo.has(f.grupo_id)) porGrupo.set(f.grupo_id, []);
+    porGrupo.get(f.grupo_id).push(f);
+  });
+  const idsGrupo = [...porGrupo.keys()];
+  if(!idsGrupo.includes(grupoAsigElegido)) grupoAsigElegido = idsGrupo[0] ?? null;
+
+  const opcion = id => {
+    const lista = porGrupo.get(id);
+    const sinDoc = lista.filter(f => !f.docente_id).length;
+    return `<option value="${id}"${id === grupoAsigElegido ? ' selected' : ''}>${
+      escapar(etiquetaRef('grupos', id))} — ${lista.length} materia${lista.length === 1 ? '' : 's'}${
+      sinDoc ? ` · ${sinDoc} sin docente` : ''}</option>`;
+  };
+
   $('#vista').innerHTML = `
-    <div class="herramientas">
-      <button class="boton" id="btnNuevaAsig">Asignar materia a un grupo</button>
+    <div class="herramientas" style="display:flex;flex-wrap:wrap;align-items:center;gap:12px">
+      ${idsGrupo.length ? `
+        <label style="display:flex;align-items:center;gap:8px;font-size:13.5px">
+          <b>Grupo</b>
+          <select id="selGrupoAsig" style="padding:7px 10px;border:1.5px solid var(--linea-fuerte);border-radius:8px;font-size:14px;min-width:280px">
+            ${idsGrupo.map(opcion).join('')}
+          </select>
+        </label>` : ''}
+      <button class="boton" id="btnNuevaAsig" style="margin-left:auto">Asignar materia a un grupo</button>
     </div>
-    <div class="tarjeta">
-      <h3>Materias asignadas <span style="font-weight:400;color:var(--texto-suave)">(${filas.length})</span>
-        <span style="font-weight:400;color:var(--texto-suave);font-size:12.5px;margin-left:auto">
-          Una línea por cada materia que se imparte en cada grupo</span></h3>
-      ${filas.length ? `
+    <div class="tarjeta" id="tarjetaAsig"></div>`;
+
+  const pintar = () => {
+    const lista = ordenarPorMateria(porGrupo.get(grupoAsigElegido) || []);
+    $('#tarjetaAsig').innerHTML = `
+      <h3>${escapar(grupoAsigElegido !== null ? etiquetaRef('grupos', grupoAsigElegido) : 'Materias asignadas')}
+        <span style="font-weight:400;color:var(--texto-suave)">(${lista.length})</span></h3>
+      ${lista.length ? `
         <div class="tabla-marco"><table class="datos">
-          <thead><tr><th>Grupo</th><th>Materia</th><th>Docente</th><th></th></tr></thead>
-          <tbody>${filas.map(f => `<tr data-id="${f.id}">
-            <td>${escapar(etiquetaRef('grupos', f.grupo_id))}</td>
+          <thead><tr><th>Materia</th><th>Docente</th><th></th></tr></thead>
+          <tbody>${lista.map(f => `<tr data-id="${f.id}">
             <td><b>${escapar(buscaEn('materias', f.materia_id)?.nombre ?? '—')}</b></td>
             <td>${f.docente_id ? escapar(etiquetaRef('docentes', f.docente_id)) : '<span class="sello ojo">Sin asignar</span>'}</td>
             <td class="acciones">
@@ -2025,10 +2082,16 @@ async function verAsignaciones(){
               <button class="boton tenue chico borrar">Quitar</button>
             </td></tr>`).join('')}</tbody>
         </table></div>`
-        : '<div class="vacio"><div class="g">◧</div><p>Todavía no asignas materias a los grupos. Sin esto no se pueden capturar calificaciones ni armar horarios.</p></div>'}
-    </div>`;
+        : `<div class="vacio"><div class="g">◧</div><p>${idsGrupo.length
+            ? 'Este grupo todavía no tiene materias asignadas. Sin esto no se pueden capturar calificaciones ni armar horarios.'
+            : 'No hay grupos registrados.'}</p></div>`}`;
+  };
+  pintar();
 
-  $('#btnNuevaAsig').addEventListener('click', () => formAsignacion(null));
+  const sel = $('#selGrupoAsig');
+  if(sel) sel.addEventListener('change', e => { grupoAsigElegido = Number(e.target.value); pintar(); });
+
+  $('#btnNuevaAsig').addEventListener('click', () => formAsignacion(null, grupoAsigElegido));
   $('#vista').addEventListener('click', async e => {
     if(vistaActual !== 'asignaciones') return;
     const tr = e.target.closest('tr[data-id]'); if(!tr) return;
@@ -2044,7 +2107,7 @@ async function verAsignaciones(){
   });
 }
 
-function formAsignacion(fila){
+function formAsignacion(fila, grupoInicial){
   const esNuevo = !fila;
   const campos = [
     {c:'grupo_id', r:'Grupo', tipo:'ref', tabla:'grupos', req:true},
@@ -2052,7 +2115,7 @@ function formAsignacion(fila){
     {c:'docente_id', r:'Docente', tipo:'ref', tabla:'docentes', vacio:'Por asignar'}
   ];
   abrirVentana(esNuevo ? 'Asignar materia' : 'Cambiar docente',
-    `<div class="rejilla-campos">${campos.map(c => campoHTML(c, fila ? fila[c.c] : '')).join('')}</div><div id="recadoForm"></div>`,
+    `<div class="rejilla-campos">${campos.map(c => campoHTML(c, fila ? fila[c.c] : (c.c === 'grupo_id' && grupoInicial != null ? grupoInicial : ''))).join('')}</div><div id="recadoForm"></div>`,
     [{texto:'Cancelar', clase:'tenue', accion:cerrarVentana},
      {texto:'Guardar', accion: async ev => {
        const registro = {};
@@ -2067,6 +2130,7 @@ function formAsignacion(fila){
          : await api('actualizar', {tabla:'grupo_materia', id:fila.id, cambios:{docente_id:registro.docente_id}});
        ev.target.disabled = false;
        if(!res.ok){ recado('#recadoForm', res.error); return; }
+       if(esNuevo) grupoAsigElegido = registro.grupo_id;
        cerrarVentana(); irA('asignaciones');
      }}]);
 }
