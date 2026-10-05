@@ -541,6 +541,7 @@ async function verTablero(){
   // La vista los entrega sin orden. Se ordenan por semestre, luego letra y
   // turno, para que salgan 1A 1B 1C 3A 3B 3C 5A 5B 5C, y el semestre que
   // viene 2A 2B 2C 4A 4B 4C 6A 6B 6C.
+  const umbral = Number(r.umbral_riesgo ?? 3);
   const grupos = [...(r.por_grupo || [])].sort((a,b) =>
     (a.semestre - b.semestre) || cmp(a.letra, b.letra) || cmp(a.turno, b.turno));
 
@@ -573,7 +574,7 @@ async function verTablero(){
         <div class="n">${e.carreras_activas ?? 0} carreras</div></div>
       <div class="medidor"><div class="r">Docentes</div>
         <div class="v">${e.docentes_activos ?? 0}</div>
-        <div class="n">${e.materias_activas ?? 0} asignaturas</div></div>
+        <div class="n">${e.materias_activas ?? 0} materias distintas</div></div>
       <div class="medidor ${e.docs_por_revisar ? 'alerta':''}"><div class="r">Documentos por revisar</div>
         <div class="v">${e.docs_por_revisar ?? 0}</div>
         <div class="n">${e.docs_aceptados ?? 0} aceptados</div></div>
@@ -635,13 +636,14 @@ async function verTablero(){
     ${(r.por_docente||[]).length ? `
     <h3 style="font-size:15px;margin:26px 0 12px">Por docente</h3>
     <div class="tarjeta">
-      <h3>Materias reprobadas por docente</h3>
+      <h3>Materias reprobadas por docente
+        <span style="font-weight:400;color:var(--texto-suave)">(${(r.por_docente||[]).length})</span></h3>
       <div class="cuerpo">
         <p style="font-size:13px;color:var(--texto-suave);max-width:66ch;margin-bottom:16px">
           Sirve para ver dónde hace falta apoyo académico. Un porcentaje alto puede
           significar muchas cosas, así que conviene leerlo junto con el contexto del grupo.
         </p>
-        ${r.por_docente.slice(0,12).map(d => {
+        ${r.por_docente.map(d => {
           const pc = d.total ? Math.round(100*d.reprobadas/d.total) : 0;
           return `<div style="display:grid;grid-template-columns:1fr 130px 90px;gap:12px;align-items:center;margin-bottom:10px">
             <div style="font-size:13px">${escapar(d.docente)}</div>
@@ -653,32 +655,71 @@ async function verTablero(){
       </div>
     </div>` : ''}
 
+    ${(r.mejores_promedios||[]).length ? `
+    <h3 style="font-size:15px;margin:26px 0 12px">Mejor promedio de cada grupo</h3>
+    <div class="tarjeta">
+      <h3>Primeros lugares
+        <span style="font-weight:400;color:var(--texto-suave)">(${r.mejores_promedios.length})</span>
+        <span class="der"><button class="boton tenue chico" id="btnExpMejores">Exportar a Excel</button></span></h3>
+      <div class="cuerpo">
+        <p style="font-size:13px;color:var(--texto-suave);max-width:70ch;margin-bottom:16px">
+          Cuando hay empate en el primer lugar, aparecen todos los que lo comparten.
+        </p>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:12px">
+          ${Object.entries((r.mejores_promedios||[]).reduce((acc,x) => {
+              (acc[x.grupo] = acc[x.grupo] || []).push(x); return acc;
+            }, {})).sort((a,b) => cmp(a[0], b[0])).map(([grupo, alumnos]) => `
+            <div style="border:1px solid var(--linea);border-radius:10px;padding:14px 16px;background:#fff">
+              <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:10px">
+                <b style="font-size:15px">${escapar(grupo)}</b>
+                <span class="sello va" style="margin-left:auto">${alumnos[0].promedio}</span>
+              </div>
+              ${alumnos.map(a => `<div style="font-size:13.5px;padding:3px 0">
+                ${escapar(a.alumno)}
+                <div style="color:var(--texto-suave);font-size:12px">${escapar(a.matricula)} · ${
+                  a.materias} materias</div></div>`).join('')}
+              ${alumnos.length > 1 ? `<div style="margin-top:8px;font-size:12px;color:var(--texto-suave)">
+                ${alumnos.length} alumnos empatados</div>` : ''}
+            </div>`).join('')}
+        </div>
+      </div>
+    </div>` : ''}
+
     <h3 style="font-size:15px;margin:26px 0 12px">Alumnos en riesgo</h3>
     <div class="tarjeta">
-      <h3>Con tres o más materias reprobadas
+      <h3>Con ${umbral} o más materias reprobadas
         <span style="font-weight:400;color:var(--texto-suave)">(${(r.alumnos_en_riesgo||[]).length})</span>
-        <span class="der">${(r.alumnos_en_riesgo||[]).length
-          ? '<button class="boton tenue chico" id="btnExpRiesgo">Exportar a Excel</button>' : ''}</span></h3>
+        <span class="der">
+          <label style="font-size:12.5px;color:var(--texto-suave);display:flex;align-items:center;gap:6px">
+            Considerar en riesgo con
+            <select id="selUmbral" style="padding:4px 8px;border:1.5px solid var(--linea-fuerte);border-radius:7px">
+              ${[1,2,3,4,5,6].map(n => `<option value="${n}"${n===umbral?' selected':''}>${n} o más</option>`).join('')}
+            </select>
+          </label>
+          ${(r.alumnos_en_riesgo||[]).length
+            ? '<button class="boton tenue chico" id="btnExpRiesgo">Exportar a Excel</button>' : ''}
+        </span></h3>
       ${(r.alumnos_en_riesgo||[]).length ? `
         <div class="tabla-marco"><table class="datos">
           <thead><tr><th>Alumno</th><th>Grupo</th><th class="n">Reprobadas</th>
-            <th class="n">Más baja</th><th>Materias</th></tr></thead>
+            <th>Materias y docente</th></tr></thead>
           <tbody>${r.alumnos_en_riesgo.map(x => `<tr class="franja ${
-              x.materias_reprobadas >= 5 ? 'cae' : 'riesgo'}">
+              x.materias_reprobadas >= umbral + 2 ? 'cae' : 'riesgo'}">
             <td><b>${escapar(x.alumno)}</b>
               <div style="color:var(--texto-suave);font-size:12px">${escapar(x.matricula)}</div></td>
             <td>${escapar(x.grupo ?? '—')}</td>
             <td class="n"><span class="sello cae">${x.materias_reprobadas}</span></td>
-            <td class="n">${nota(x.calificacion_mas_baja)}</td>
-            <td style="color:var(--texto-suave);font-size:12.5px;max-width:420px">${escapar(x.materias)}</td>
+            <td style="font-size:12.5px;max-width:520px">
+              ${escapar(x.materias_con_docente ?? x.materias ?? '')
+                 .split(' · ').map(m => `<div style="padding:1px 0">${m}</div>`).join('')}</td>
           </tr>`).join('')}
           </tbody></table></div>
         <p class="aviso-nota" style="padding:0 17px 15px">
-          Se considera en riesgo a quien lleva tres o más materias reprobadas.
-          Para ver todas las materias reprobadas del plantel, incluidas las de
-          alumnos con una o dos, usa el respaldo de calificaciones.
+          Entre paréntesis va el docente de cada materia reprobada. Para ver todas
+          las reprobadas del plantel, incluidas las de alumnos por debajo del umbral,
+          usa el respaldo de calificaciones.
         </p>`
-        : '<div class="vacio"><div class="g">◆</div><p>Ningún alumno con tres o más materias reprobadas.</p></div>'}
+        : `<div class="vacio"><div class="g">◆</div><p>Ningún alumno con ${umbral} o más materias reprobadas.</p></div>`}
     </div>`;
 
   const bg = $('#btnExpGrupos');
@@ -690,7 +731,19 @@ async function verTablero(){
   const br = $('#btnExpRiesgo');
   if(br) br.addEventListener('click', () => exportarCSV('alumnos_en_riesgo', r.alumnos_en_riesgo,
     ['matricula','alumno','grupo','semestre','materias_reprobadas',
-     'calificacion_mas_baja','promedio_reprobadas','materias']));
+     'promedio_reprobadas','materias_con_docente','docentes']));
+
+  const bm = $('#btnExpMejores');
+  if(bm) bm.addEventListener('click', () => exportarCSV('mejores_promedios', r.mejores_promedios,
+    ['grupo','matricula','alumno','promedio','materias']));
+
+  const su = $('#selUmbral');
+  if(su) su.addEventListener('change', async e => {
+    e.target.disabled = true;
+    const res = await api('guardar_umbral', {umbral: Number(e.target.value)});
+    if(!res.ok){ alert(res.error); e.target.disabled = false; return; }
+    irA('tablero');
+  });
 }
 
 /* ==========================================================================
@@ -1523,14 +1576,37 @@ async function verFicha(id){
         : '<div class="vacio"><p>El alumno no ha registrado datos de salud.</p></div>'}
     </div>
 
-    <div id="ft_c" class="oculto">${r.calificaciones.length ? `
+    <div id="ft_c" class="oculto">${r.calificaciones.length ? (() => {
+      // Promedio de cada parcial, contando solo lo que ya tiene número
+      const prom = campo => {
+        const v = r.calificaciones.map(c => c[campo])
+                   .filter(x => x !== null && x !== undefined && x !== '');
+        return v.length ? (v.reduce((s,x) => s + Number(x), 0) / v.length).toFixed(1) : null;
+      };
+      const p1 = prom('p1'), p2 = prom('p2'), p3 = prom('p3'), pf = prom('calificacion_final');
+      const col = v => v === null ? 'var(--texto-suave)'
+                    : Number(v) < 6 ? 'var(--rojo)' : Number(v) < 8 ? 'var(--ambar)' : 'var(--verde)';
+      return `
       <div class="tabla-marco"><table class="datos" style="min-width:0">
         <thead><tr><th>Materia</th><th class="n">P1</th><th class="n">P2</th><th class="n">P3</th><th class="n">Final</th></tr></thead>
-        <tbody>${r.calificaciones.map(c => `<tr>
+        <tbody>${r.calificaciones.map(c => `<tr class="franja ${
+            c.calificacion_final === null || c.calificacion_final === undefined ? 'espera'
+            : Number(c.calificacion_final) < 6 ? 'cae'
+            : Number(c.calificacion_final) < 7 ? 'riesgo' : 'va'}">
           <td>${escapar(c.materia)}</td><td class="n">${nota(c.p1)}</td><td class="n">${nota(c.p2)}</td>
           <td class="n">${nota(c.p3)}</td><td class="n"><b>${nota(c.calificacion_final)}</b></td></tr>`).join('')}
-        </tbody></table></div>`
-      : '<div class="vacio"><p>Sin calificaciones capturadas.</p></div>'}</div>
+        </tbody>
+        <tfoot><tr style="background:#EDF2EB;font-weight:700">
+          <td>Promedio</td>
+          <td class="n" style="color:${col(p1)}">${p1 ?? '—'}</td>
+          <td class="n" style="color:${col(p2)}">${p2 ?? '—'}</td>
+          <td class="n" style="color:${col(p3)}">${p3 ?? '—'}</td>
+          <td class="n" style="color:${col(pf)}">${pf ?? '—'}</td>
+        </tr></tfoot>
+      </table></div>
+      <p class="aviso-nota">Cada promedio cuenta solo las materias que ya tienen
+      calificación en ese parcial.</p>`;
+    })() : '<div class="vacio"><p>Sin calificaciones capturadas.</p></div>'}</div>
 
     <div id="ft_a" class="oculto">
       ${ra.dias_registrados ? `
@@ -2956,8 +3032,10 @@ async function verAsistencia(){
       <div class="cuerpo">
         <p style="font-size:13.5px;color:var(--texto-suave);max-width:68ch">
           Sube el archivo con las inasistencias del día. Debe traer las columnas
-          <b>ID</b>, <b>Nombre</b>, <b>Fecha</b> y <b>Estado</b>. Solo se registra a
-          quien faltó; quien no aparece se toma como presente.
+          <b>ID</b>, <b>Nombre</b>, <b>Semestre</b>, <b>Grupo</b>, <b>Fecha</b>,
+          <b>Hora</b>, <b>Estado</b> y <b>Registro</b>. Las obligatorias son ID,
+          Fecha y Estado. Solo se registra a quien faltó; quien no aparece se toma
+          como presente.
         </p>
         <div class="campo" style="margin-top:18px">
           <label for="archAsist">Archivo</label>
@@ -3086,6 +3164,7 @@ function armarAsistencia(matriz){
   const enc = matriz[0].map(c => normTxt(c));
   const iID = enc.indexOf('ID'), iNom = enc.indexOf('NOMBRE');
   const iFec = enc.indexOf('FECHA'), iEst = enc.indexOf('ESTADO');
+  const iHora = enc.indexOf('HORA'), iReg = enc.indexOf('REGISTRO');
 
   const faltan = [];
   if(iID < 0)  faltan.push('ID');
@@ -3113,7 +3192,21 @@ function armarAsistencia(matriz){
     const f = limpia(c[iFec]).slice(0,10);
     if(f) fechas.add(f);
 
-    filas.push({id, nombre: iNom >= 0 ? limpia(c[iNom]) : '', ...mapeo});
+    // La hora puede venir como texto (08:15) o como fracción de día de Excel
+    let hora = iHora >= 0 ? limpia(c[iHora]) : '';
+    if(hora && /^0?\.\d+$/.test(hora)){
+      const m = Math.round(parseFloat(hora) * 24 * 60);
+      hora = String(Math.floor(m/60)).padStart(2,'0') + ':' + String(m%60).padStart(2,'0');
+    }
+    if(hora && !/^\d{1,2}:\d{2}/.test(hora)) hora = '';
+
+    filas.push({
+      id,
+      nombre: iNom >= 0 ? limpia(c[iNom]) : '',
+      hora: hora ? hora.slice(0,5) : null,
+      registro: iReg >= 0 ? (limpia(c[iReg]) || null) : null,
+      ...mapeo
+    });
   }
 
   if(!filas.length){ recado('#recadoAsist','No se encontró ninguna inasistencia en el archivo.'); return; }
