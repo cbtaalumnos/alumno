@@ -571,10 +571,14 @@ async function verTablero(){
         <div class="n">${e.materias_reprobadas ?? 0} materias reprobadas</div></div>
       <div class="medidor"><div class="r">Grupos</div>
         <div class="v">${e.grupos_activos ?? 0}</div>
-        <div class="n">${e.carreras_activas ?? 0} carreras</div></div>
+        <div class="n">${e.alumnos_activos ?? 0} alumnos inscritos</div></div>
       <div class="medidor"><div class="r">Docentes</div>
         <div class="v">${e.docentes_activos ?? 0}</div>
-        <div class="n">${e.materias_activas ?? 0} materias distintas</div></div>
+        <div class="n">${e.carreras_activas ?? 0} carreras</div></div>
+      <div class="medidor"><div class="r">Materias</div>
+        <div class="v">${e.materias_distintas ?? e.materias_activas ?? 0}</div>
+        <div class="n">${e.materias_activas ?? 0} versiones por carrera · ${
+          e.asignaciones ?? 0} asignadas a grupos</div></div>
       <div class="medidor ${e.docs_por_revisar ? 'alerta':''}"><div class="r">Documentos por revisar</div>
         <div class="v">${e.docs_por_revisar ?? 0}</div>
         <div class="n">${e.docs_aceptados ?? 0} aceptados</div></div>
@@ -1779,6 +1783,8 @@ async function verMaterias(){
   $('#vista').innerHTML = `
     <div class="tarjeta">
       <h3>Materias <span style="font-weight:400;color:var(--texto-suave)">(${lista.length})</span>
+        <span style="font-weight:400;color:var(--texto-suave);font-size:12.5px;margin-left:12px">
+          agrupadas por nombre; cada carrera tiene su versión</span>
         <span class="der">
           <button class="boton peligro chico oculto" id="btnBorrarSel">Borrar seleccionadas</button>
           <button class="boton tenue chico" id="btnExpMat">Exportar a Excel</button>
@@ -2004,7 +2010,9 @@ async function verAsignaciones(){
       <button class="boton" id="btnNuevaAsig">Asignar materia a un grupo</button>
     </div>
     <div class="tarjeta">
-      <h3>Materias asignadas <span style="font-weight:400;color:var(--texto-suave)">(${filas.length})</span></h3>
+      <h3>Materias asignadas <span style="font-weight:400;color:var(--texto-suave)">(${filas.length})</span>
+        <span style="font-weight:400;color:var(--texto-suave);font-size:12.5px;margin-left:auto">
+          Una línea por cada materia que se imparte en cada grupo</span></h3>
       ${filas.length ? `
         <div class="tabla-marco"><table class="datos">
           <thead><tr><th>Grupo</th><th>Materia</th><th>Docente</th><th></th></tr></thead>
