@@ -533,25 +533,84 @@ document.addEventListener('keydown', e => { if(e.key==='Escape') cerrarVentana()
 /* ==========================================================================
    TABLERO
    ========================================================================== */
+/* El tablero académico se calcula en el navegador a partir de las
+   calificaciones (v_calificaciones). Así el mismo cálculo sirve para el
+   acumulado y para cada parcial, y el detalle que se abre al pulsar un
+   docente cuadra exactamente con su barra.
+
+   Reprobada = calificación menor a 6.
+   «General» usa la calificación final; si todavía no hay, el promedio de
+   los parciales capturados. «Parcial N» usa solo la columna de ese parcial. */
+let tableroModo = 'general';        // general | p1 | p2 | p3
+let tableroOrdenRiesgo = 'apellido'; // apellido | grupo
+let tableroDatos = null;
+
+const MODOS_TABLERO = {
+  general:{corto:'General',   largo:'acumulado del periodo'},
+  p1:     {corto:'Parcial 1', largo:'primer parcial'},
+  p2:     {corto:'Parcial 2', largo:'segundo parcial'},
+  p3:     {corto:'Parcial 3', largo:'tercer parcial'}
+};
+
+// Convierte una calificación a número; lo vacío o no numérico es null
+function numCalif(v){
+  if(v === null || v === undefined || v === '') return null;
+  const n = Number(String(v).replace(',', '.'));
+  return Number.isFinite(n) ? n : null;
+}
+
+function califSegunModo(c, modo){
+  if(modo !== 'general') return numCalif(c[modo]);
+  const f = numCalif(c.calificacion_final);
+  if(f !== null) return f;
+  const pp = numCalif(c.promedio_parciales);
+  if(pp !== null) return pp;
+  const ps = ['p1','p2','p3'].map(k => numCalif(c[k])).filter(x => x !== null);
+  return ps.length ? ps.reduce((s,x) => s + x, 0) / ps.length : null;
+}
+
+// "1-A (M.T.)", "1A", "1° A"… → "1A", para cruzar grupos de distintas fuentes
+function claveGrupo(t){
+  const m = String(t ?? '').toUpperCase().match(/(\d+)\D*?([A-Z])/);
+  return m ? m[1] + m[2] : String(t ?? '').toUpperCase();
+}
+
+const redondea1 = x => Math.round(x * 10) / 10;
+const pct = (a, b) => b ? Math.round(1000 * a / b) / 10 : 0;
+
 async function verTablero(){
-  const [r, rj, ra] = await Promise.all([
+  const [r, rj, ra, rAl, calif] = await Promise.all([
     api('estadisticas'),
     api('listar', {tabla:'jornadas', orden:'fecha', limite:400}),
-    api('listar', {tabla:'v_resumen_inasistencias', orden:'alumno', limite:2000})
+    api('listar', {tabla:'v_resumen_inasistencias', orden:'alumno', limite:2000}),
+    api('listar', {tabla:'alumnos',
+      columnas:'id,matricula,apellido_paterno,apellido_materno,nombres,grupo_id,activo,estatus', limite:3000}),
+    traerTodo('v_calificaciones', 'id')
   ]);
   if(!r.ok) throw new Error(r.error);
-  const e = r.estadisticas || {};
 
-  /* ASISTENCIA POR GRUPO
-     La estadística del servidor no la trae, porque la asistencia se registra
-     solo con inasistencias. Se calcula aquí: días que faltaron todos los
-     alumnos del grupo entre (alumnos del grupo × días cargados). Quien no
-     aparece en el resumen asistió todos los días. */
+  // Si la vista trae más de un periodo, se usa el más reciente
+  let filas = calif;
+  const periodos = new Set(filas.map(f => f.periodo).filter(Boolean));
+  if(periodos.size > 1){
+    const lista = lookups.periodos || [];
+    const vigente = lista.find(p => p.activo && (periodos.has(p.clave) || periodos.has(p.nombre)))
+                 || lista.find(p => periodos.has(p.clave) || periodos.has(p.nombre));
+    const elegido = vigente ? (periodos.has(vigente.clave) ? vigente.clave : vigente.nombre)
+                            : [...periodos].sort((a,b) => cmp(b,a))[0];
+    filas = filas.filter(f => f.periodo === elegido);
+  }
+
+  // Alumnos activos, por matrícula, con su grupo y nombre para ordenar
+  const alumnos = new Map();
+  (rAl.ok ? rAl.datos : []).forEach(a => {
+    if(a.activo === false || a.estatus === 'EGRESADO' || a.estatus === 'BAJA') return;
+    alumnos.set(String(a.matricula), a);
+  });
+  if(alumnos.size) filas = filas.filter(f => alumnos.has(String(f.matricula)));
+
+  // Asistencia por grupo (solo se registran inasistencias)
   const diasCargados = rj.ok ? rj.datos.length : 0;
-  const claveGrupo = t => {
-    const m = String(t ?? '').toUpperCase().match(/(\d+)\D*?([A-Z])/);
-    return m ? m[1] + m[2] : String(t ?? '').toUpperCase();
-  };
   const faltasPorGrupo = new Map();
   for(const x of (ra.ok ? ra.datos : [])){
     const dias = Number(x.dias_registrados) || 0;
@@ -560,44 +619,202 @@ async function verTablero(){
     const k = claveGrupo(x.grupo);
     faltasPorGrupo.set(k, (faltasPorGrupo.get(k) || 0) + perdidos);
   }
-  const asistenciaDe = g => {
-    if(!diasCargados || !g.alumnos) return g.asistencia ?? null;
-    const perdidos = faltasPorGrupo.get(claveGrupo(g.grupo)) || 0;
-    return Math.max(0, Math.round(1000 * (1 - perdidos / (g.alumnos * diasCargados))) / 10);
-  };
 
-  // La vista los entrega sin orden. Se ordenan por semestre, luego letra y
-  // turno, para que salgan 1A 1B 1C 3A 3B 3C 5A 5B 5C, y el semestre que
-  // viene 2A 2B 2C 4A 4B 4C 6A 6B 6C.
-  const umbral = Number(r.umbral_riesgo ?? 3);
-  const grupos = [...(r.por_grupo || [])].sort((a,b) =>
-    (a.semestre - b.semestre) || cmp(a.letra, b.letra) || cmp(a.turno, b.turno))
-    .map(g => ({...g, asistencia: asistenciaDe(g)}));
+  tableroDatos = {r, filas, alumnos, diasCargados, faltasPorGrupo,
+                  umbral: Number(r.umbral_riesgo ?? 3)};
+  pintarTablero();
+}
+
+/* Calcula todo lo académico para un modo (general, p1, p2, p3) */
+function estadisticaModo(modo){
+  const {filas, alumnos, umbral} = tableroDatos;
+  const porAlumno = new Map();
+  const porDocente = new Map();
+  let suma = 0, calificadas = 0, reprobadas = 0;
+  const dist = [0,0,0,0,0,0]; // sin calificar, <6, 6, 7, 8, 9-10
+
+  for(const c of filas){
+    const v = califSegunModo(c, modo);
+    const mat = String(c.matricula);
+    const al = alumnos.get(mat);
+    const grupo = al?.grupo_id ? buscaEn('grupos', al.grupo_id) : null;
+
+    if(!porAlumno.has(mat)) porAlumno.set(mat, {
+      matricula: mat,
+      alumno: al ? `${al.apellido_paterno ?? ''} ${al.apellido_materno ?? ''} ${al.nombres ?? ''}`.replace(/\s+/g,' ').trim()
+                 : (c.alumno ?? mat),
+      orden: al || {apellido_paterno: c.alumno ?? ''},
+      grupoObj: grupo,
+      grupo: grupo ? nombreGrupo(grupo) : (c.grupo ?? '—'),
+      semestre: grupo?.semestre ?? c.semestre ?? '',
+      inscritas: 0, calificadas: 0, suma: 0, reprobadas: []
+    });
+    const a = porAlumno.get(mat);
+    a.inscritas++;
+
+    if(v === null){ dist[0]++; continue; }
+    calificadas++; suma += v;
+    a.calificadas++; a.suma += v;
+    dist[v < 6 ? 1 : v < 7 ? 2 : v < 8 ? 3 : v < 9 ? 4 : 5]++;
+
+    const docente = c.docente || null;
+    if(docente){
+      if(!porDocente.has(docente)) porDocente.set(docente, {docente, total:0, reprobadas:[]});
+      porDocente.get(docente).total++;
+    }
+    if(v < 6){
+      reprobadas++;
+      const det = {materia: c.materia ?? '—', docente: docente ?? 'Sin docente', calif: v};
+      a.reprobadas.push(det);
+      if(docente) porDocente.get(docente).reprobadas.push({...det,
+        alumno: a.alumno, matricula: mat, grupo: a.grupo, semestre: a.semestre, grupoObj: a.grupoObj, orden: a.orden});
+    }
+  }
+
+  const listaAlumnos = [...porAlumno.values()];
+  const enRiesgo = listaAlumnos.filter(a => a.reprobadas.length >= umbral);
+
+  // Por grupo
+  const porGrupo = new Map();
+  for(const a of listaAlumnos){
+    const k = a.grupoObj ? claveGrupo(nombreGrupo(a.grupoObj)) : claveGrupo(a.grupo);
+    if(!porGrupo.has(k)) porGrupo.set(k, {inscritas:0, calificadas:0, suma:0, reprobadas:0, enRiesgo:0, alumnos:[]});
+    const g = porGrupo.get(k);
+    g.inscritas += a.inscritas; g.calificadas += a.calificadas; g.suma += a.suma;
+    g.reprobadas += a.reprobadas.length;
+    if(a.reprobadas.length >= umbral) g.enRiesgo++;
+    g.alumnos.push(a);
+  }
+
+  // Mejor promedio de cada grupo: entre quienes tienen más materias calificadas
+  const mejores = [];
+  for(const g of porGrupo.values()){
+    const conNotas = g.alumnos.filter(a => a.calificadas);
+    if(!conNotas.length) continue;
+    const maxCal = Math.max(...conNotas.map(a => a.calificadas));
+    const cand = conNotas.filter(a => a.calificadas === maxCal)
+      .map(a => ({...a, promedio: Math.round(100 * a.suma / a.calificadas) / 100}));
+    const tope = Math.max(...cand.map(a => a.promedio));
+    cand.filter(a => a.promedio === tope).forEach(a => mejores.push(a));
+  }
+
+  return {
+    modo, calificadas, reprobadas, inscritas: filas.length,
+    promedio: calificadas ? redondea1(suma / calificadas) : null,
+    sinCalificar: dist[0], dist,
+    alumnos: listaAlumnos, enRiesgo, porGrupo,
+    porDocente: [...porDocente.values()]
+      .sort((a,b) => (b.reprobadas.length / b.total) - (a.reprobadas.length / a.total) || cmp(a.docente, b.docente)),
+    mejores
+  };
+}
+
+function pintarTablero(){
+  const {r, diasCargados, faltasPorGrupo, umbral} = tableroDatos;
+  const e = r.estadisticas || {};
+  const modo = tableroModo;
+  const est = estadisticaModo(modo);
+  const totalAlumnos = Number(e.alumnos_activos) || est.alumnos.length;
+
+  // Qué parciales ya tienen calificaciones
+  const conDatos = {general: true};
+  ['p1','p2','p3'].forEach(p => conDatos[p] = tableroDatos.filas.some(c => numCalif(c[p]) !== null));
+  if(!conDatos[modo]){ tableroModo = 'general'; return pintarTablero(); }
 
   const barra = (valor, max, color) => {
     const ancho = max ? Math.round(100 * valor / max) : 0;
     return `<div style="background:#EDF2EB;border-radius:4px;height:8px;overflow:hidden">
       <div style="width:${ancho}%;height:100%;background:${color}"></div></div>`;
   };
-
   const colorProm = p => p === null || p === undefined ? 'var(--linea-fuerte)'
                        : p < 6 ? 'var(--rojo)' : p < 8 ? 'var(--ambar)' : 'var(--verde)';
+  const colorPct = p => p >= 30 ? 'var(--rojo)' : p >= 15 ? 'var(--ambar)' : 'var(--verde)';
 
-  const maxDist = Math.max(1, ...(r.distribucion||[]).map(x => x.cantidad));
-  const colorRango = {0:'#BFCCBB',1:'#D93025',2:'#E8A33D',3:'#2B4FA2',4:'#00A0B8',5:'#1F7A3F'};
+  const asistenciaDe = g => {
+    if(!diasCargados || !g.alumnos) return g.asistencia ?? null;
+    const perdidos = faltasPorGrupo.get(claveGrupo(g.grupo)) || 0;
+    return Math.max(0, Math.round(1000 * (1 - perdidos / (g.alumnos * diasCargados))) / 10);
+  };
+
+  // Grupos: lo no académico del servidor, lo académico del modo elegido
+  const grupos = [...(r.por_grupo || [])].sort((a,b) =>
+    (a.semestre - b.semestre) || cmp(a.letra, b.letra) || cmp(a.turno, b.turno))
+    .map(g => {
+      const a = est.porGrupo.get(claveGrupo(g.grupo)) || {inscritas:0, calificadas:0, suma:0, reprobadas:0, enRiesgo:0};
+      return {...g,
+        asistencia: asistenciaDe(g),
+        promedio: a.calificadas ? redondea1(a.suma / a.calificadas) : null,
+        materias_inscritas: a.inscritas, materias_calificadas: a.calificadas,
+        materias_reprobadas: a.reprobadas,
+        porcentaje_reprobacion: pct(a.reprobadas, a.calificadas),
+        alumnos_en_riesgo: a.enRiesgo,
+        porcentaje_en_riesgo: pct(a.enRiesgo, g.alumnos)};
+    });
+
+  const rangos = ['Sin calificar','Reprobado (menos de 6)','6 a 6.9','7 a 7.9','8 a 8.9','9 a 10'];
+  const colorRango = ['#BFCCBB','#D93025','#E8A33D','#2B4FA2','#00A0B8','#1F7A3F'];
+  const maxDist = Math.max(1, ...est.dist);
+  const pctReprob = pct(est.reprobadas, est.calificadas);
+  const pctRiesgo = pct(est.enRiesgo.length, totalAlumnos);
+  const etiquetaModo = MODOS_TABLERO[modo].largo;
+
+  // Evolución por parcial (solo en General)
+  const evolucion = modo === 'general'
+    ? ['p1','p2','p3','general'].filter(m => conDatos[m]).map(m => ({m, s: m === 'general' ? est : estadisticaModo(m)}))
+    : [];
+
+  // Alumnos en riesgo, en el orden elegido
+  const ordenApellido = (a,b) => ORDENES.alumnos(a.orden, b.orden) || cmp(a.alumno, b.alumno);
+  const riesgo = [...est.enRiesgo].sort(tableroOrdenRiesgo === 'grupo'
+    ? (a,b) => (a.grupoObj && b.grupoObj ? ORDENES.grupos(a.grupoObj, b.grupoObj) : cmp(a.grupo, b.grupo))
+               || ordenApellido(a,b)
+    : ordenApellido);
+
+  const filaRiesgo = x => `<tr class="franja ${x.reprobadas.length >= umbral + 2 ? 'cae' : 'riesgo'}">
+      <td><b>${escapar(x.alumno)}</b>
+        <div style="color:var(--texto-suave);font-size:12px">${escapar(x.matricula)}</div></td>
+      <td>${escapar(x.grupo ?? '—')}</td>
+      <td class="n"><span class="sello cae">${x.reprobadas.length}</span></td>
+      <td style="font-size:12.5px;max-width:520px">${x.reprobadas.map(m =>
+        `<div style="padding:1px 0">${escapar(m.materia)} <span style="color:var(--texto-suave)">(${
+          escapar(m.docente)}) · ${redondea1(m.calif)}</span></div>`).join('')}</td>
+    </tr>`;
+
+  let cuerpoRiesgo = '';
+  if(tableroOrdenRiesgo === 'grupo'){
+    let actual = null;
+    for(const x of riesgo){
+      if(x.grupo !== actual){
+        actual = x.grupo;
+        const n = riesgo.filter(y => y.grupo === actual).length;
+        cuerpoRiesgo += `<tr><td colspan="4" style="background:#EDF2EB;font-weight:650;font-size:13px">
+          ${escapar(actual)} <span style="font-weight:400;color:var(--texto-suave)">· ${n} alumno${n === 1 ? '' : 's'}</span></td></tr>`;
+      }
+      cuerpoRiesgo += filaRiesgo(x);
+    }
+  } else cuerpoRiesgo = riesgo.map(filaRiesgo).join('');
 
   $('#vista').innerHTML = `
-    <h3 style="font-size:15px;margin-bottom:12px">Plantel</h3>
+    <div class="pestanas" id="tabsTablero" style="margin-bottom:18px">
+      ${Object.entries(MODOS_TABLERO).map(([k, m]) => `<button data-modo="${k}"
+        class="${k === modo ? 'activo' : ''}" ${conDatos[k] ? '' : 'disabled style="opacity:.4;cursor:not-allowed" title="Todavía no hay calificaciones de este parcial"'}>${m.corto}</button>`).join('')}
+    </div>
+
+    <h3 style="font-size:15px;margin-bottom:12px">Plantel
+      <span style="font-weight:400;color:var(--texto-suave)">· ${etiquetaModo}</span></h3>
     <div class="medidores">
       <div class="medidor bien"><div class="r">Alumnos activos</div>
         <div class="v">${e.alumnos_activos ?? 0}</div>
         <div class="n">${e.alumnos_con_acceso ?? 0} ya crearon su contraseña</div></div>
-      <div class="medidor"><div class="r">Promedio general</div>
-        <div class="v">${e.promedio_general ?? '—'}</div>
-        <div class="n">${e.sin_calificar ?? 0} materias sin calificar</div></div>
-      <div class="medidor ${e.alumnos_en_riesgo ? 'alerta':'bien'}"><div class="r">Alumnos en riesgo</div>
-        <div class="v">${e.alumnos_en_riesgo ?? 0}</div>
-        <div class="n">${e.materias_reprobadas ?? 0} materias reprobadas</div></div>
+      <div class="medidor"><div class="r">Promedio ${modo === 'general' ? 'general' : 'del ' + etiquetaModo}</div>
+        <div class="v">${est.promedio ?? '—'}</div>
+        <div class="n">${est.sinCalificar} materias sin calificar</div></div>
+      <div class="medidor ${est.reprobadas ? 'alerta' : 'bien'}"><div class="r">Reprobación</div>
+        <div class="v">${pctReprob}%</div>
+        <div class="n">${est.reprobadas} de ${est.calificadas} materias calificadas</div></div>
+      <div class="medidor ${est.enRiesgo.length ? 'alerta' : 'bien'}"><div class="r">Alumnos en riesgo</div>
+        <div class="v">${est.enRiesgo.length} <span style="font-size:.55em;font-weight:600">· ${pctRiesgo}%</span></div>
+        <div class="n">del plantel, con ${umbral} o más reprobadas</div></div>
       <div class="medidor"><div class="r">Grupos</div>
         <div class="v">${e.grupos_activos ?? 0}</div>
         <div class="n">${e.alumnos_activos ?? 0} alumnos inscritos</div></div>
@@ -611,16 +828,49 @@ async function verTablero(){
         <div class="n">${e.docs_aceptados ?? 0} aceptados</div></div>
     </div>
 
+    ${evolucion.length > 1 ? `
+    <div class="tarjeta" style="margin-top:22px">
+      <h3>Avance por parcial
+        <span class="der"><button class="boton tenue chico" id="btnExpParciales">Exportar a Excel</button></span></h3>
+      <div class="tabla-marco"><table class="datos" style="min-width:0">
+        <thead><tr><th></th><th class="n">Promedio</th><th class="n">Calificadas</th>
+          <th class="n">Reprobadas</th><th class="n">% reprobación</th>
+          <th class="n">Alumnos en riesgo</th><th class="n">% en riesgo</th></tr></thead>
+        <tbody>${evolucion.map(({m, s}) => {
+          const pr = pct(s.reprobadas, s.calificadas), pe = pct(s.enRiesgo.length, totalAlumnos);
+          return `<tr${m === 'general' ? ' style="background:#EDF2EB;font-weight:650"' : ''}>
+            <td><b>${m === 'general' ? 'General (acumulado)' : MODOS_TABLERO[m].corto}</b></td>
+            <td class="n"><b style="color:${colorProm(s.promedio)}">${s.promedio ?? '—'}</b></td>
+            <td class="n">${s.calificadas}</td>
+            <td class="n">${s.reprobadas}</td>
+            <td class="n"><b style="color:${colorPct(pr)}">${pr}%</b></td>
+            <td class="n">${s.enRiesgo.length}</td>
+            <td class="n">${pe}%</td></tr>`;
+        }).join('')}</tbody>
+      </table></div>
+      <div class="tabla-marco" style="border-top:1px solid var(--linea)"><table class="datos" style="min-width:0">
+        <thead><tr><th>Promedio por grupo</th>${evolucion.map(({m}) =>
+          `<th class="n">${m === 'general' ? 'General' : MODOS_TABLERO[m].corto}</th>`).join('')}</tr></thead>
+        <tbody>${grupos.map(g => `<tr><td><b>${escapar(g.grupo)}</b></td>${evolucion.map(({s}) => {
+          const a = s.porGrupo.get(claveGrupo(g.grupo));
+          const p = a && a.calificadas ? redondea1(a.suma / a.calificadas) : null;
+          return `<td class="n" style="color:${colorProm(p)};font-weight:600">${p ?? '—'}</td>`;
+        }).join('')}</tr>`).join('')}</tbody>
+      </table></div>
+      <p class="aviso-nota" style="padding:0 17px 15px">Cada parcial cuenta solo las materias que ya
+        tienen calificación en ese parcial. El general usa la calificación final, o el promedio
+        de los parciales capturados mientras no la haya.</p>
+    </div>` : ''}
+
     <div class="tarjeta" style="margin-top:22px">
       <h3>Cómo va el plantel
-        <span style="font-weight:400;color:var(--texto-suave)">· distribución de calificaciones</span></h3>
+        <span style="font-weight:400;color:var(--texto-suave)">· distribución de calificaciones, ${etiquetaModo}</span></h3>
       <div class="cuerpo">
-        ${(r.distribucion||[]).length ? (r.distribucion||[]).map(x => `
+        ${est.calificadas ? est.dist.map((n, i) => `
           <div style="display:grid;grid-template-columns:180px 1fr 70px;gap:12px;align-items:center;margin-bottom:10px">
-            <div style="font-size:13px">${escapar(x.rango)}</div>
-            ${barra(x.cantidad, maxDist, colorRango[x.orden] || 'var(--verde)')}
-            <div style="font-size:13px;text-align:right;font-variant-numeric:tabular-nums">
-              ${x.cantidad}</div>
+            <div style="font-size:13px">${rangos[i]}</div>
+            ${barra(n, maxDist, colorRango[i])}
+            <div style="font-size:13px;text-align:right;font-variant-numeric:tabular-nums">${n}</div>
           </div>`).join('')
           : '<div class="vacio"><p>Todavía no hay calificaciones capturadas.</p></div>'}
       </div>
@@ -628,7 +878,7 @@ async function verTablero(){
 
     <h3 style="font-size:15px;margin:26px 0 12px">Por grupo</h3>
     <div class="tarjeta">
-      <h3>Comparativo
+      <h3>Comparativo <span style="font-weight:400;color:var(--texto-suave)">· ${etiquetaModo}</span>
         <span class="der"><button class="boton tenue chico" id="btnExpGrupos">Exportar a Excel</button></span></h3>
       ${grupos.length ? `
         <div class="tabla-marco"><table class="datos">
@@ -650,8 +900,10 @@ async function verTablero(){
               <td class="n">${g.alumnos}</td>
               <td class="n"><b style="color:${colorProm(g.promedio)}">${g.promedio ?? '—'}</b></td>
               <td class="n">${g.alumnos_en_riesgo
-                ? `<span class="sello cae">${g.alumnos_en_riesgo}</span>` : '0'}</td>
-              <td class="n">${g.materias_reprobadas}</td>
+                ? `<span class="sello cae">${g.alumnos_en_riesgo}</span>
+                   <div style="font-size:11.5px;color:var(--texto-suave);margin-top:3px">${g.porcentaje_en_riesgo}%</div>` : '0'}</td>
+              <td class="n">${g.materias_reprobadas}${g.materias_calificadas
+                ? `<div style="font-size:11.5px;color:var(--texto-suave);margin-top:3px">${g.porcentaje_reprobacion}%</div>` : ''}</td>
               <td class="n">${avanceCal}%<div style="margin-top:4px;width:56px">
                 ${barra(avanceCal,100,'var(--cian)')}</div></td>
               <td class="n">${g.asistencia !== null && g.asistencia !== undefined
@@ -665,56 +917,63 @@ async function verTablero(){
         : '<div class="vacio"><div class="g">◆</div><p>No hay grupos registrados.</p></div>'}
     </div>
 
-    ${(r.por_docente||[]).length ? `
+    ${est.porDocente.length ? `
     <h3 style="font-size:15px;margin:26px 0 12px">Por docente</h3>
     <div class="tarjeta">
       <h3>Materias reprobadas por docente
-        <span style="font-weight:400;color:var(--texto-suave)">(${(r.por_docente||[]).length})</span></h3>
-      <div class="cuerpo">
+        <span style="font-weight:400;color:var(--texto-suave)">(${est.porDocente.length}) · ${etiquetaModo}</span>
+        <span class="der"><button class="boton tenue chico" id="btnExpDocentes">Exportar a Excel</button></span></h3>
+      <div class="cuerpo" id="listaDocentes">
         <p style="font-size:13px;color:var(--texto-suave);max-width:66ch;margin-bottom:16px">
           Sirve para ver dónde hace falta apoyo académico. Un porcentaje alto puede
           significar muchas cosas, así que conviene leerlo junto con el contexto del grupo.
+          Pulsa el nombre de un docente para ver quiénes reprobaron.
         </p>
-        ${r.por_docente.map(d => {
-          const pc = d.total ? Math.round(100*d.reprobadas/d.total) : 0;
-          const color = pc >= 30 ? 'var(--rojo)' : pc >= 15 ? 'var(--ambar)' : 'var(--verde)';
+        ${est.porDocente.map((d, i) => {
+          const n = d.reprobadas.length;
+          const pc = d.total ? Math.round(100 * n / d.total) : 0;
+          const color = colorPct(pc);
           return `<div style="display:grid;grid-template-columns:1fr 130px 56px 90px;gap:12px;align-items:center;margin-bottom:10px">
-            <div style="font-size:13px">${escapar(d.docente)}</div>
+            <div style="font-size:13px">${n
+              ? `<a href="#" class="verDocente" data-i="${i}" style="color:var(--verde);text-decoration:underline;text-underline-offset:2px">${escapar(d.docente)}</a>`
+              : escapar(d.docente)}</div>
             ${barra(pc, 100, color)}
             <div style="font-size:13px;text-align:right;font-variant-numeric:tabular-nums">
               <b style="color:${color}">${pc}%</b></div>
             <div style="font-size:12.5px;text-align:right;color:var(--texto-suave)">
-              ${d.reprobadas} de ${d.total}</div>
+              ${n} de ${d.total}</div>
           </div>`;
         }).join('')}
       </div>
     </div>` : ''}
 
-    ${(r.mejores_promedios||[]).length ? `
+    ${est.mejores.length ? `
     <h3 style="font-size:15px;margin:26px 0 12px">Mejor promedio de cada grupo</h3>
     <div class="tarjeta">
       <h3>Primeros lugares
-        <span style="font-weight:400;color:var(--texto-suave)">(${r.mejores_promedios.length})</span>
+        <span style="font-weight:400;color:var(--texto-suave)">(${est.mejores.length}) · ${etiquetaModo}</span>
         <span class="der"><button class="boton tenue chico" id="btnExpMejores">Exportar a Excel</button></span></h3>
       <div class="cuerpo">
         <p style="font-size:13px;color:var(--texto-suave);max-width:70ch;margin-bottom:16px">
           Cuando hay empate en el primer lugar, aparecen todos los que lo comparten.
         </p>
         <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:12px">
-          ${Object.entries((r.mejores_promedios||[]).reduce((acc,x) => {
+          ${Object.values(est.mejores.reduce((acc, x) => {
               (acc[x.grupo] = acc[x.grupo] || []).push(x); return acc;
-            }, {})).sort((a,b) => cmp(a[0], b[0])).map(([grupo, alumnos]) => `
+            }, {})).sort((a,b) => a[0].grupoObj && b[0].grupoObj
+              ? ORDENES.grupos(a[0].grupoObj, b[0].grupoObj) : cmp(a[0].grupo, b[0].grupo))
+            .map(lista => `
             <div style="border:1px solid var(--linea);border-radius:10px;padding:14px 16px;background:#fff">
               <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:10px">
-                <b style="font-size:15px">${escapar(grupo)}</b>
-                <span class="sello va" style="margin-left:auto">${alumnos[0].promedio}</span>
+                <b style="font-size:15px">${escapar(lista[0].grupo)}</b>
+                <span class="sello va" style="margin-left:auto">${lista[0].promedio}</span>
               </div>
-              ${alumnos.map(a => `<div style="font-size:13.5px;padding:3px 0">
+              ${lista.map(a => `<div style="font-size:13.5px;padding:3px 0">
                 ${escapar(a.alumno)}
                 <div style="color:var(--texto-suave);font-size:12px">${escapar(a.matricula)} · ${
-                  a.materias} materias</div></div>`).join('')}
-              ${alumnos.length > 1 ? `<div style="margin-top:8px;font-size:12px;color:var(--texto-suave)">
-                ${alumnos.length} alumnos empatados</div>` : ''}
+                  a.calificadas} materias</div></div>`).join('')}
+              ${lista.length > 1 ? `<div style="margin-top:8px;font-size:12px;color:var(--texto-suave)">
+                ${lista.length} alumnos empatados</div>` : ''}
             </div>`).join('')}
         </div>
       </div>
@@ -723,32 +982,28 @@ async function verTablero(){
     <h3 style="font-size:15px;margin:26px 0 12px">Alumnos en riesgo</h3>
     <div class="tarjeta">
       <h3>Con ${umbral} o más materias reprobadas
-        <span style="font-weight:400;color:var(--texto-suave)">(${(r.alumnos_en_riesgo||[]).length})</span>
-        <span class="der">
+        <span style="font-weight:400;color:var(--texto-suave)">(${riesgo.length} · ${pctRiesgo}% del plantel)</span>
+        <span class="der" style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
+          <label style="font-size:12.5px;color:var(--texto-suave);display:flex;align-items:center;gap:6px">
+            Ordenar por
+            <select id="selOrdenRiesgo" style="padding:4px 8px;border:1.5px solid var(--linea-fuerte);border-radius:7px">
+              <option value="apellido"${tableroOrdenRiesgo === 'apellido' ? ' selected' : ''}>Apellido</option>
+              <option value="grupo"${tableroOrdenRiesgo === 'grupo' ? ' selected' : ''}>Grupo</option>
+            </select>
+          </label>
           <label style="font-size:12.5px;color:var(--texto-suave);display:flex;align-items:center;gap:6px">
             Considerar en riesgo con
             <select id="selUmbral" style="padding:4px 8px;border:1.5px solid var(--linea-fuerte);border-radius:7px">
               ${[1,2,3,4,5,6].map(n => `<option value="${n}"${n===umbral?' selected':''}>${n} o más</option>`).join('')}
             </select>
           </label>
-          ${(r.alumnos_en_riesgo||[]).length
-            ? '<button class="boton tenue chico" id="btnExpRiesgo">Exportar a Excel</button>' : ''}
+          ${riesgo.length ? '<button class="boton tenue chico" id="btnExpRiesgo">Exportar a Excel</button>' : ''}
         </span></h3>
-      ${(r.alumnos_en_riesgo||[]).length ? `
+      ${riesgo.length ? `
         <div class="tabla-marco"><table class="datos">
           <thead><tr><th>Alumno</th><th>Grupo</th><th class="n">Reprobadas</th>
-            <th>Materias y docente</th></tr></thead>
-          <tbody>${r.alumnos_en_riesgo.map(x => `<tr class="franja ${
-              x.materias_reprobadas >= umbral + 2 ? 'cae' : 'riesgo'}">
-            <td><b>${escapar(x.alumno)}</b>
-              <div style="color:var(--texto-suave);font-size:12px">${escapar(x.matricula)}</div></td>
-            <td>${escapar(x.grupo ?? '—')}</td>
-            <td class="n"><span class="sello cae">${x.materias_reprobadas}</span></td>
-            <td style="font-size:12.5px;max-width:520px">
-              ${escapar(x.materias_con_docente ?? x.materias ?? '')
-                 .split(' · ').map(m => `<div style="padding:1px 0">${m}</div>`).join('')}</td>
-          </tr>`).join('')}
-          </tbody></table></div>
+            <th>Materia (docente) · calificación</th></tr></thead>
+          <tbody>${cuerpoRiesgo}</tbody></table></div>
         <p class="aviso-nota" style="padding:0 17px 15px">
           Entre paréntesis va el docente de cada materia reprobada. Para ver todas
           las reprobadas del plantel, incluidas las de alumnos por debajo del umbral,
@@ -757,28 +1012,101 @@ async function verTablero(){
         : `<div class="vacio"><div class="g">◆</div><p>Ningún alumno con ${umbral} o más materias reprobadas.</p></div>`}
     </div>`;
 
-  const bg = $('#btnExpGrupos');
-  if(bg) bg.addEventListener('click', () => exportarCSV('estadisticas_por_grupo', grupos,
-    ['grupo','carrera','alumnos','irregulares','promedio','alumnos_en_riesgo',
-     'materias_reprobadas','materias_calificadas','materias_inscritas','asistencia',
-     'docs_aceptados','docs_esperados']));
+  /* ---- Eventos (los elementos se reemplazan en cada pintado) ---- */
+  $('#tabsTablero').addEventListener('click', ev => {
+    const b = ev.target.closest('button[data-modo]');
+    if(!b || b.disabled) return;
+    tableroModo = b.dataset.modo;
+    pintarTablero();
+  });
 
-  const br = $('#btnExpRiesgo');
-  if(br) br.addEventListener('click', () => exportarCSV('alumnos_en_riesgo', r.alumnos_en_riesgo,
-    ['matricula','alumno','grupo','semestre','materias_reprobadas',
-     'promedio_reprobadas','materias_con_docente','docentes']));
+  const sufijo = modo === 'general' ? '' : '_' + modo;
+
+  const bp = $('#btnExpParciales');
+  if(bp) bp.addEventListener('click', () => exportarCSV('avance_por_parcial', evolucion.map(({m, s}) => ({
+    parcial: m === 'general' ? 'General' : MODOS_TABLERO[m].corto,
+    promedio: s.promedio, materias_calificadas: s.calificadas, materias_reprobadas: s.reprobadas,
+    porcentaje_reprobacion: pct(s.reprobadas, s.calificadas),
+    alumnos_en_riesgo: s.enRiesgo.length, porcentaje_en_riesgo: pct(s.enRiesgo.length, totalAlumnos)
+  })), ['parcial','promedio','materias_calificadas','materias_reprobadas','porcentaje_reprobacion',
+        'alumnos_en_riesgo','porcentaje_en_riesgo']));
+
+  const bg = $('#btnExpGrupos');
+  if(bg) bg.addEventListener('click', () => exportarCSV('estadisticas_por_grupo' + sufijo, grupos,
+    ['grupo','carrera','alumnos','promedio','alumnos_en_riesgo','porcentaje_en_riesgo',
+     'materias_reprobadas','porcentaje_reprobacion','materias_calificadas','materias_inscritas',
+     'asistencia','docs_aceptados','docs_esperados']));
+
+  const bd = $('#btnExpDocentes');
+  if(bd) bd.addEventListener('click', () => exportarCSV('reprobacion_por_docente' + sufijo,
+    est.porDocente.map(d => ({docente: d.docente, materias_calificadas: d.total,
+      materias_reprobadas: d.reprobadas.length,
+      porcentaje_reprobacion: d.total ? Math.round(100 * d.reprobadas.length / d.total) : 0})),
+    ['docente','materias_calificadas','materias_reprobadas','porcentaje_reprobacion']));
+
+  const ld = $('#listaDocentes');
+  if(ld) ld.addEventListener('click', ev => {
+    const a = ev.target.closest('.verDocente'); if(!a) return;
+    ev.preventDefault();
+    abrirDetalleDocente(est.porDocente[Number(a.dataset.i)], etiquetaModo, sufijo);
+  });
 
   const bm = $('#btnExpMejores');
-  if(bm) bm.addEventListener('click', () => exportarCSV('mejores_promedios', r.mejores_promedios,
+  if(bm) bm.addEventListener('click', () => exportarCSV('mejores_promedios' + sufijo,
+    est.mejores.map(a => ({grupo: a.grupo, matricula: a.matricula, alumno: a.alumno,
+      promedio: a.promedio, materias: a.calificadas})),
     ['grupo','matricula','alumno','promedio','materias']));
 
-  const su = $('#selUmbral');
-  if(su) su.addEventListener('change', async e => {
-    e.target.disabled = true;
-    const res = await api('guardar_umbral', {umbral: Number(e.target.value)});
-    if(!res.ok){ alert(res.error); e.target.disabled = false; return; }
-    irA('tablero');
+  const br = $('#btnExpRiesgo');
+  if(br) br.addEventListener('click', () => exportarCSV('alumnos_en_riesgo' + sufijo,
+    riesgo.map(x => ({matricula: x.matricula, alumno: x.alumno, grupo: x.grupo, semestre: x.semestre,
+      materias_reprobadas: x.reprobadas.length,
+      materias_con_docente: x.reprobadas.map(m => `${m.materia} (${m.docente}) ${redondea1(m.calif)}`).join(' · ')})),
+    ['matricula','alumno','grupo','semestre','materias_reprobadas','materias_con_docente']));
+
+  $('#selOrdenRiesgo').addEventListener('change', ev => {
+    tableroOrdenRiesgo = ev.target.value;
+    pintarTablero();
   });
+
+  $('#selUmbral').addEventListener('change', async ev => {
+    ev.target.disabled = true;
+    const res = await api('guardar_umbral', {umbral: Number(ev.target.value)});
+    if(!res.ok){ alert(res.error); ev.target.disabled = false; return; }
+    tableroDatos.umbral = Number(ev.target.value);
+    pintarTablero();
+  });
+}
+
+/* Lista de alumnos que reprobaron con un docente */
+function abrirDetalleDocente(d, etiquetaModo, sufijo){
+  const lista = [...d.reprobadas].sort((a,b) =>
+    (a.grupoObj && b.grupoObj ? ORDENES.grupos(a.grupoObj, b.grupoObj) : cmp(a.grupo, b.grupo))
+    || cmp(a.materia, b.materia)
+    || ORDENES.alumnos(a.orden, b.orden) || cmp(a.alumno, b.alumno));
+  const pc = d.total ? Math.round(100 * lista.length / d.total) : 0;
+
+  abrirVentana(d.docente, `
+    <p style="font-size:13.5px;color:var(--texto-suave);margin-bottom:14px">
+      ${lista.length} materia${lista.length === 1 ? '' : 's'} reprobada${lista.length === 1 ? '' : 's'}
+      de ${d.total} calificadas (${pc}%) · ${escapar(etiquetaModo)}</p>
+    <div class="tabla-marco"><table class="datos" style="min-width:0">
+      <thead><tr><th>Alumno</th><th class="n">Sem.</th><th>Grupo</th><th>Materia</th><th class="n">Calif.</th></tr></thead>
+      <tbody>${lista.map(x => `<tr class="franja cae">
+        <td><b>${escapar(x.alumno)}</b>
+          <div style="color:var(--texto-suave);font-size:12px">${escapar(x.matricula)}</div></td>
+        <td class="n">${escapar(x.semestre)}</td>
+        <td>${escapar(x.grupo)}</td>
+        <td style="font-size:12.5px">${escapar(x.materia)}</td>
+        <td class="n"><span class="sello cae">${redondea1(x.calif)}</span></td>
+      </tr>`).join('')}</tbody>
+    </table></div>`,
+    [{texto:'Exportar a Excel', clase:'tenue', accion: () => exportarCSV(
+        'reprobados_' + d.docente.replace(/[^A-Za-zÁÉÍÓÚÑáéíóúñ0-9]+/g, '_') + sufijo,
+        lista.map(x => ({alumno: x.alumno, matricula: x.matricula, semestre: x.semestre,
+          grupo: x.grupo, materia: x.materia, calificacion: redondea1(x.calif)})),
+        ['alumno','matricula','semestre','grupo','materia','calificacion'])},
+     {texto:'Cerrar', accion: cerrarVentana}]);
 }
 
 /* ==========================================================================
