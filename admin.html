@@ -3429,6 +3429,17 @@ async function verAsistencia(){
   const resumen = res.ok ? res.datos : [];
   const enRiesgo = resumen.filter(x => Number(x.porcentaje_asistencia) < 80 && x.dias_registrados > 0);
 
+  // Registros individuales, para contar faltas y justificadas de cada día
+  const registros = await traerInasistencias();
+  const porDia = new Map();
+  (registros || []).forEach(x => {
+    const k = String(x.fecha).slice(0,10);
+    if(!porDia.has(k)) porDia.set(k, {FALTA:0, JUSTIFICADA:0, RETARDO:0});
+    const t = tipoAsist(x);
+    porDia.get(k)[t] = (porDia.get(k)[t] || 0) + 1;
+  });
+  const cuentaDia = (f, t) => registros ? (porDia.get(String(f).slice(0,10))?.[t] ?? 0) : 0;
+
   $('#vista').innerHTML = `
     <div class="tarjeta">
       <h3>Subir la asistencia de un día</h3>
@@ -3482,19 +3493,31 @@ async function verAsistencia(){
       <h3>Días cargados <span style="font-weight:400;color:var(--texto-suave)">(${jornadas.length})</span></h3>
       ${jornadas.length ? `
         <div class="tabla-marco"><table class="datos" style="min-width:0">
-          <thead><tr><th>Fecha</th><th>Archivo</th><th>Cargado</th><th></th></tr></thead>
-          <tbody>${jornadas.map(x => `<tr data-fecha="${escapar(x.fecha)}">
+          <thead><tr><th>Fecha</th><th class="n">Faltas</th><th class="n">Justificadas</th>
+            <th class="n">Retardos</th><th>Archivo</th><th>Cargado</th><th></th></tr></thead>
+          <tbody id="tablaJornadas">${jornadas.map(x => `<tr data-fecha="${escapar(x.fecha)}">
             <td><b>${fecha(x.fecha)}</b></td>
+            <td class="n">${cuentaDia(x.fecha,'FALTA') ? `<span class="sello cae">${cuentaDia(x.fecha,'FALTA')}</span>` : 0}</td>
+            <td class="n">${cuentaDia(x.fecha,'JUSTIFICADA') ? `<span class="sello info">${cuentaDia(x.fecha,'JUSTIFICADA')}</span>` : 0}</td>
+            <td class="n">${cuentaDia(x.fecha,'RETARDO') ? `<span class="sello ojo">${cuentaDia(x.fecha,'RETARDO')}</span>` : 0}</td>
             <td style="color:var(--texto-suave);font-size:12.5px">${escapar(x.archivo ?? '—')}</td>
             <td style="color:var(--texto-suave);font-size:12.5px">${
               x.registrada_en ? new Date(x.registrada_en).toLocaleString('es-MX') : '—'}</td>
-            <td class="acciones"><button class="boton tenue chico borrarJornada">Quitar</button></td>
+            <td class="acciones">
+              <button class="boton chico verJornada">Ver alumnos</button>
+              <button class="boton tenue chico borrarJornada">Quitar</button></td>
           </tr>`).join('')}</tbody>
         </table></div>`
         : '<div class="vacio"><div class="g">◧</div><p>Todavía no has cargado ningún día.</p></div>'}
     </div>`;
 
   $('#archAsist').addEventListener('change', leerAsistencia);
+
+  const tj = $('#tablaJornadas');
+  if(tj) tj.addEventListener('click', ev => {
+    if(!ev.target.classList.contains('verJornada')) return;
+    verDiaAsistencia(ev.target.closest('tr[data-fecha]').dataset.fecha, registros);
+  });
 
   const be = $('#btnExpAsist');
   if(be) be.addEventListener('click', () => exportarCSV('asistencia_baja', enRiesgo,
@@ -3510,6 +3533,108 @@ async function verAsistencia(){
     if(!r.ok){ alert(r.error); return; }
     irA('asistencia');
   });
+}
+
+/* Clasifica un registro de inasistencia: FALTA, JUSTIFICADA o RETARDO */
+function tipoAsist(x){
+  const t = String(x.tipo ?? '').toUpperCase();
+  if(t === 'FALTA' || t === 'JUSTIFICADA' || t === 'RETARDO') return t;
+  const e = String(x.estado ?? '').toUpperCase();
+  return ESTADOS_ASIST[e]?.tipo || (e.startsWith('JUSTIFIC') ? 'JUSTIFICADA' : e === 'RETARDO' ? 'RETARDO' : 'FALTA');
+}
+
+/* Trae todos los registros de inasistencia (tabla «inasistencias», uno por
+   alumno y día). Ojo: «asistencias» es la tabla vieja por materia y ya no se
+   usa. Devuelve null si falla, para que la pantalla siga funcionando. */
+async function traerInasistencias(){
+  try { return await traerTodo('inasistencias', 'fecha'); } catch(_) { return null; }
+}
+
+/* Lista de alumnos que faltaron, justificaron o llegaron tarde un día */
+async function verDiaAsistencia(f, registros){
+  const dia = String(f).slice(0,10);
+  if(!registros){
+    abrirVentana(`Asistencia del ${fecha(f)}`,
+      `<div class="recado ojo" style="margin-top:0">No se pudieron leer los registros de
+        asistencia. Recarga la página e inténtalo de nuevo.</div>`, [{texto:'Cerrar', accion:cerrarVentana}]);
+    return;
+  }
+
+  // Nombres y grupos de los alumnos
+  const ra = await api('listar', {tabla:'alumnos',
+    columnas:'id,matricula,apellido_paterno,apellido_materno,nombres,grupo_id', limite:3000});
+  const alumnos = new Map((ra.ok ? ra.datos : []).map(a => [a.id, a]));
+
+  const filas = registros.filter(x => String(x.fecha).slice(0,10) === dia).map(x => {
+    const a = alumnos.get(x.alumno_id) || {};
+    const g = a.grupo_id ? buscaEn('grupos', a.grupo_id) : null;
+    const tipo = tipoAsist(x);
+    return {
+      matricula: a.matricula ?? x.matricula ?? '',
+      alumno: a.apellido_paterno
+        ? `${a.apellido_paterno} ${a.apellido_materno ?? ''} ${a.nombres ?? ''}`.replace(/\s+/g,' ').trim()
+        : (x.nombre ?? x.alumno ?? '—'),
+      orden: a.apellido_paterno ? a : {apellido_paterno: x.nombre ?? x.alumno ?? ''},
+      grupoObj: g, grupo: g ? nombreGrupo(g) : (x.grupo ?? '—'), grupo_id: g?.id ?? null,
+      tipo,
+      estado: tipo === 'JUSTIFICADA'
+        ? `Justificada${x.motivo ? ' (' + String(x.motivo).toLowerCase() + ')' : ''}`
+        : tipo === 'RETARDO' ? 'Retardo' : 'Falta',
+      hora: x.hora ? String(x.hora).slice(0,5) : ''
+    };
+  }).sort((a,b) => (a.grupoObj && b.grupoObj ? ORDENES.grupos(a.grupoObj, b.grupoObj) : cmp(a.grupo, b.grupo))
+                   || ORDENES.alumnos(a.orden, b.orden));
+
+  const grupos = [...new Map(filas.filter(x => x.grupoObj).map(x => [x.grupo_id, x.grupoObj])).values()]
+    .sort(ORDENES.grupos);
+  let filtroTipo = '', filtroGrupo = '';
+
+  const pinta = () => {
+    const vis = filas.filter(x => (!filtroTipo || x.tipo === filtroTipo)
+                               && (!filtroGrupo || String(x.grupo_id) === filtroGrupo));
+    const n = t => filas.filter(x => (!filtroGrupo || String(x.grupo_id) === filtroGrupo) && x.tipo === t).length;
+    $('#diaResumen').innerHTML = `
+      <div class="medidores" style="margin:0 0 14px">
+        <div class="medidor alerta"><div class="r">Faltas</div><div class="v">${n('FALTA')}</div></div>
+        <div class="medidor"><div class="r">Justificadas</div><div class="v">${n('JUSTIFICADA')}</div></div>
+        <div class="medidor"><div class="r">Retardos</div><div class="v">${n('RETARDO')}</div></div>
+      </div>`;
+    $('#diaTabla').innerHTML = vis.length ? `
+      <div class="tabla-marco"><table class="datos" style="min-width:0">
+        <thead><tr><th>Alumno</th><th>Grupo</th><th>Estado</th><th>Hora</th></tr></thead>
+        <tbody>${vis.map(x => `<tr class="franja ${x.tipo === 'FALTA' ? 'cae' : x.tipo === 'RETARDO' ? 'riesgo' : 'espera'}">
+          <td><b>${escapar(x.alumno)}</b>
+            <div style="color:var(--texto-suave);font-size:12px">${escapar(x.matricula)}</div></td>
+          <td>${escapar(x.grupo)}</td>
+          <td><span class="sello ${x.tipo === 'FALTA' ? 'cae' : x.tipo === 'RETARDO' ? 'ojo' : 'info'}">${escapar(x.estado)}</span></td>
+          <td style="color:var(--texto-suave)">${escapar(x.hora || '—')}</td></tr>`).join('')}</tbody>
+      </table></div>`
+      : '<div class="vacio"><p>Nadie con ese filtro.</p></div>';
+    return vis;
+  };
+
+  abrirVentana(`Asistencia del ${fecha(f)}`, `
+    <div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:14px">
+      <select id="diaTipo" style="padding:6px 10px;border:1.5px solid var(--linea-fuerte);border-radius:8px">
+        <option value="">Todas (${filas.length})</option>
+        <option value="FALTA">Solo faltas</option>
+        <option value="JUSTIFICADA">Solo justificadas</option>
+        <option value="RETARDO">Solo retardos</option>
+      </select>
+      <select id="diaGrupo" style="padding:6px 10px;border:1.5px solid var(--linea-fuerte);border-radius:8px">
+        <option value="">Todos los grupos</option>
+        ${grupos.map(g => `<option value="${g.id}">${escapar(nombreGrupo(g))}</option>`).join('')}
+      </select>
+    </div>
+    <div id="diaResumen"></div>
+    <div id="diaTabla"></div>`,
+    [{texto:'Exportar a Excel', clase:'tenue', accion: () => exportarCSV('inasistencias_' + dia, pinta(),
+        ['matricula','alumno','grupo','estado','hora'])},
+     {texto:'Cerrar', accion: cerrarVentana}]);
+
+  pinta();
+  $('#diaTipo').addEventListener('change', e => { filtroTipo = e.target.value; pinta(); });
+  $('#diaGrupo').addEventListener('change', e => { filtroGrupo = e.target.value; pinta(); });
 }
 
 function leerAsistencia(e){
