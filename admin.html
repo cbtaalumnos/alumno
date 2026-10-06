@@ -93,7 +93,33 @@ a{color:var(--verde)}
 .barra{position:sticky;top:0;z-index:30;background:rgba(246,248,244,.94);backdrop-filter:blur(8px);
   border-bottom:1px solid var(--linea);padding:12px 26px;display:flex;align-items:center;gap:14px}
 .barra h2{font-size:18px;font-variation-settings:'wdth' 108}
-.barra .yo{margin-left:auto;text-align:right;line-height:1.25}
+.barra .yo{text-align:right;line-height:1.25}
+.campana{margin-left:auto;position:relative;width:40px;height:40px;border-radius:50%;
+  border:1.5px solid var(--linea);background:#fff;cursor:pointer;display:grid;place-items:center;
+  color:var(--texto-suave);transition:background .15s,color .15s}
+.campana:hover{background:#EDF2EB;color:var(--verde)}
+.campana svg{width:20px;height:20px}
+.campana.con{color:var(--verde);border-color:var(--verde)}
+.campana.con svg{animation:mece 2.4s ease-in-out infinite;transform-origin:50% 10%}
+@keyframes mece{0%,70%,100%{transform:rotate(0)}76%{transform:rotate(14deg)}84%{transform:rotate(-12deg)}92%{transform:rotate(6deg)}}
+@media (prefers-reduced-motion:reduce){.campana.con svg{animation:none}}
+.campana .globo{position:absolute;top:-5px;right:-6px;min-width:20px;height:20px;padding:0 5px;
+  border-radius:10px;background:var(--rojo);color:#fff;font-size:11.5px;font-weight:700;
+  display:none;align-items:center;justify-content:center;border:2px solid var(--papel,#fff)}
+.campana.con .globo{display:flex}
+.avisos-caja{position:absolute;top:58px;right:18px;width:min(380px,calc(100vw - 32px));
+  background:#fff;border:1px solid var(--linea);border-radius:12px;box-shadow:0 18px 44px rgba(14,42,25,.18);
+  display:none;z-index:40;overflow:hidden}
+.avisos-caja.vivo{display:block}
+.avisos-caja .cab{padding:13px 16px;border-bottom:1px solid var(--linea);font-weight:650;font-size:14px}
+.avisos-caja .lista{max-height:340px;overflow-y:auto}
+.avisos-caja .it{display:block;width:100%;text-align:left;padding:10px 16px;border:none;background:none;
+  border-bottom:1px solid var(--linea);cursor:pointer;font-size:13px}
+.avisos-caja .it:hover{background:#F4F7F2}
+.avisos-caja .it small{display:block;color:var(--texto-suave);font-size:12px;margin-top:2px}
+.avisos-caja .pie{padding:11px 16px}
+.menu button .cuenta{margin-left:auto;background:var(--rojo);color:#fff;font-size:11px;font-weight:700;
+  border-radius:9px;padding:1px 7px;min-width:18px;text-align:center}
 .barra .yo b{display:block;font-size:13px}
 .barra .yo span{font-size:11.5px;color:var(--texto-suave)}
 .hamburguesa{display:none;background:none;border:none;font-size:22px;cursor:pointer;padding:2px 5px}
@@ -256,6 +282,12 @@ table.datos input.celda:focus{outline:2px solid var(--cian);outline-offset:0;bor
     <header class="barra">
       <button class="hamburguesa" id="btnMenu" aria-label="Abrir menú">☰</button>
       <h2 id="tituloVista">Tablero</h2>
+      <button class="campana" id="btnCampana" aria-label="Documentos por revisar" title="Documentos por revisar">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
+        <span class="globo" id="campanaNum">0</span>
+      </button>
+      <div class="avisos-caja" id="avisosCaja"></div>
       <div class="yo"><b id="yoNombre">—</b><span id="yoRol">—</span></div>
     </header>
     <div class="vista" id="vista"></div>
@@ -365,7 +397,79 @@ async function abrirPanel(){
   $('#yoRol').textContent = sesion.admin.rol;
   await cargarLookups();
   irA('tablero');
+  revisarPendientes();
+  setInterval(revisarPendientes, 90 * 1000);
 }
+
+/* ==========================================================================
+   CAMPANITA · documentos que esperan revisión
+   Se consulta al entrar, cada minuto y medio, al volver a la pestaña y cada
+   vez que se cambia de sección (así se apaga al terminar de revisar).
+   ========================================================================== */
+let pendientesDocs = [];
+const TITULO_BASE = document.title;
+
+async function revisarPendientes(){
+  if(!sesion.token) return;
+  const r = await api('bandeja_documentos');
+  if(!r.ok) return;
+  pendientesDocs = r.pendientes || [];
+  const n = pendientesDocs.length;
+
+  const b = $('#btnCampana');
+  b.classList.toggle('con', n > 0);
+  $('#campanaNum').textContent = n > 99 ? '99+' : n;
+  b.title = n ? `${n} documento${n === 1 ? '' : 's'} por revisar` : 'Sin documentos por revisar';
+  document.title = n ? `(${n}) ${TITULO_BASE}` : TITULO_BASE;
+
+  const boton = document.querySelector('#menu button[data-vista="documentos"]');
+  if(boton){
+    let c = boton.querySelector('.cuenta');
+    if(n){
+      if(!c){ c = document.createElement('span'); c.className = 'cuenta'; boton.appendChild(c); }
+      c.textContent = n > 99 ? '99+' : n;
+    } else if(c) c.remove();
+  }
+  if($('#avisosCaja').classList.contains('vivo')) pintarAvisos();
+}
+
+function pintarAvisos(){
+  const n = pendientesDocs.length;
+  const hace = t => {
+    if(!t) return '';
+    const min = Math.round((Date.now() - new Date(t)) / 60000);
+    if(min < 1) return 'hace un momento';
+    if(min < 60) return `hace ${min} min`;
+    const h = Math.round(min / 60);
+    if(h < 24) return `hace ${h} h`;
+    const d = Math.round(h / 24);
+    return `hace ${d} día${d === 1 ? '' : 's'}`;
+  };
+  $('#avisosCaja').innerHTML = `
+    <div class="cab">${n ? `${n} documento${n === 1 ? '' : 's'} por revisar` : 'Todo al día'}</div>
+    ${n ? `<div class="lista">${pendientesDocs.slice(0, 30).map(p => {
+        const a = p.alumnos || {};
+        const g = a.grupos ? nombreGrupo(a.grupos) : '';
+        return `<button class="it irDocs">
+          <b>${escapar(`${a.apellido_paterno ?? ''} ${a.apellido_materno ?? ''} ${a.nombres ?? ''}`.trim() || 'Alumno')}</b>
+          <small>${escapar(p.documentos_catalogo?.nombre ?? 'Documento')}${g ? ' · ' + escapar(g) : ''}${
+            p.subido_en ? ' · ' + hace(p.subido_en) : ''}</small></button>`;
+      }).join('')}</div>
+      <div class="pie"><button class="boton chico irDocs" style="width:100%">Ir a revisar</button></div>`
+      : '<p style="padding:16px;font-size:13px;color:var(--texto-suave)">No hay documentos esperando revisión.</p>'}`;
+}
+
+$('#btnCampana').addEventListener('click', ev => {
+  ev.stopPropagation();
+  const caja = $('#avisosCaja');
+  if(caja.classList.toggle('vivo')){ pintarAvisos(); revisarPendientes(); }
+});
+$('#avisosCaja').addEventListener('click', ev => {
+  ev.stopPropagation();
+  if(ev.target.closest('.irDocs')){ $('#avisosCaja').classList.remove('vivo'); irA('documentos'); }
+});
+document.addEventListener('click', () => $('#avisosCaja').classList.remove('vivo'));
+document.addEventListener('visibilitychange', () => { if(!document.hidden) revisarPendientes(); });
 
 $('#btnSalir').addEventListener('click', async () => {
   await llamar('auth', {accion:'logout', token:sesion.token});
@@ -476,6 +580,7 @@ $('#velo').addEventListener('click', () => {
 
 async function irA(vista){
   vistaActual = vista;
+  if(typeof revisarPendientes === 'function') revisarPendientes();
   $$('#menu button').forEach(b => b.classList.toggle('activo', b.dataset.vista === vista));
   $('#tituloVista').textContent = TITULOS[vista] || '';
   $('#lateral').classList.remove('abierto'); $('#velo').classList.remove('vivo');
