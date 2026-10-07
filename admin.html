@@ -270,6 +270,7 @@ table.datos input.celda:focus{outline:2px solid var(--cian);outline-offset:0;bor
 
       <div class="menu-grupo">Comunicación</div>
       <button data-vista="avisos"><span class="ic">✦</span> Avisos</button>
+      <button data-vista="notificaciones"><span class="ic">◔</span> Notificaciones</button>
 
       <div class="menu-grupo">Cuenta</div>
       <button data-vista="clave"><span class="ic">◑</span> Mi contraseña</button>
@@ -597,7 +598,7 @@ const TITULOS = {
   tablero:'Tablero', alumnos:'Alumnos', documentos:'Documentos',
   reportes:'Reportes', asignaciones:'Materias por grupo',
   horarios:'Horarios', grupos:'Grupos', materias:'Materias', docentes:'Docentes', modulos:'Módulos y submódulos',
-  carreras:'Carreras', periodos:'Periodos', avisos:'Avisos',
+  carreras:'Carreras', periodos:'Periodos', avisos:'Avisos', notificaciones:'Notificaciones al alumno',
   importar:'Importar Excel', asistencia:'Asistencia', respaldo:'Respaldo de datos',
   cierre:'Cierre de ciclo', clave:'Mi contraseña'
 };
@@ -642,6 +643,7 @@ async function irA(vista){
     else if(vista==='modulos')        await verModulos();
     else if(vista==='docentes')       await verDocentes();
     else if(vista==='avisos')         await verCatalogo('avisos');
+    else if(vista==='notificaciones') await verNotificaciones();
     else if(vista==='clave')          verClave();
     else                              await verCatalogo(vista);
   }catch(e){
@@ -1623,6 +1625,7 @@ function formulario(tabla, fila){
 
         if(!res.ok){ recado('#recadoForm', res.error); return; }
         cerrarVentana();
+        if(tabla === 'avisos' && res.notificados) avisoEnviado(res.notificados);
         await cargarLookups();
         irA(tabla);
      }}]
@@ -2850,6 +2853,147 @@ function pintarModulos(relaciones){
 }
 
 /* ==========================================================================
+   NOTIFICACIONES AL TELÉFONO DEL ALUMNO
+
+   Se envían solas al publicar un aviso o al guardar un reporte visible para
+   el alumno. Aquí se ve cuántos alumnos las activaron, se manda una prueba y,
+   la primera vez, se generan las llaves. Las llaves se crean en este
+   navegador: no pasan por ningún servidor hasta que tú las pegas en Supabase.
+   ========================================================================== */
+function avisoEnviado(n){
+  if(n === undefined || n === null) return;
+  const t = document.createElement('div');
+  t.textContent = n ? `Se notificó en ${n} teléfono${n === 1 ? '' : 's'}.`
+                    : 'Guardado. Ningún teléfono por notificar todavía.';
+  t.style.cssText = 'position:fixed;bottom:22px;right:22px;z-index:80;background:var(--verde-hondo);'
+    + 'color:#fff;padding:12px 16px;border-radius:10px;font-size:13.5px;box-shadow:0 10px 30px rgba(0,0,0,.25)';
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 4000);
+}
+
+async function verNotificaciones(){
+  const r = await api('push_estado');
+  if(!r.ok) throw new Error(r.error.includes('no reconocida')
+    ? 'Falta actualizar la función admin-api a la versión 24.' : r.error);
+
+  const porc = r.activos ? Math.round(100 * r.alumnos / r.activos) : 0;
+
+  $('#vista').innerHTML = `
+    <div class="medidores">
+      <div class="medidor ${r.configurado ? 'bien' : 'alerta'}"><div class="r">Estado</div>
+        <div class="v" style="font-size:20px">${r.configurado ? 'Listo' : 'Sin configurar'}</div>
+        <div class="n">${r.configurado ? 'Las llaves están en Supabase' : 'Faltan las llaves'}</div></div>
+      <div class="medidor"><div class="r">Alumnos con notificaciones</div>
+        <div class="v">${r.alumnos}</div>
+        <div class="n">${porc}% de ${r.activos} alumnos activos</div></div>
+      <div class="medidor"><div class="r">Teléfonos registrados</div>
+        <div class="v">${r.dispositivos}</div>
+        <div class="n">un alumno puede tener varios</div></div>
+    </div>
+
+    <div class="tarjeta" style="margin-top:18px">
+      <h3>Cuándo le llega una notificación al alumno</h3>
+      <div class="cuerpo" style="font-size:13.5px;max-width:78ch">
+        <p><b>Avisos:</b> al publicarlo, a los alumnos a quienes va dirigido (todos, un grupo,
+        un semestre o una carrera). Si tiene fecha de publicación futura, sale ese día en
+        cuanto alguien abra el panel.</p>
+        <p style="margin-top:8px"><b>Reportes:</b> al guardarlo, solo si está marcado como
+        visible para el alumno. El mensaje dice únicamente «Tienes un nuevo reporte en tu
+        portal», sin el motivo, porque se ve con el teléfono bloqueado. Las notas internas
+        no se notifican.</p>
+        <p style="margin-top:8px;color:var(--texto-suave)">Cada alumno las activa desde el Inicio
+        de su portal. En iPhone primero debe agregar el portal a su pantalla de inicio.</p>
+      </div>
+    </div>
+
+    ${r.configurado ? `
+    <div class="tarjeta" style="margin-top:18px">
+      <h3>Enviar una prueba</h3>
+      <div class="cuerpo">
+        <p style="font-size:13.5px;color:var(--texto-suave);margin-bottom:12px">
+          Escribe la matrícula de un alumno que ya activó las notificaciones (puede ser una
+          cuenta de prueba) y le llegará un mensaje en su teléfono.</p>
+        <div class="herramientas" style="margin:0">
+          <div class="campo crece" style="margin:0"><input id="pzMatricula" placeholder="Matrícula"></div>
+          <button class="boton" id="btnPrueba">Enviar prueba</button>
+        </div>
+        <div id="recadoPrueba"></div>
+      </div>
+    </div>` : ''}
+
+    <div class="tarjeta" style="margin-top:18px">
+      <h3>${r.configurado ? 'Llaves' : 'Configurar (una sola vez)'}</h3>
+      <div class="cuerpo" style="font-size:13.5px;max-width:80ch">
+        ${r.configurado ? `
+          <p>Las llaves ya están puestas. <b>No las cambies</b>: si generas unas nuevas, todos
+          los alumnos tendrán que volver a activar las notificaciones.</p>
+          <details style="margin-top:12px"><summary style="cursor:pointer;color:var(--texto-suave)">
+            Generar llaves nuevas de todos modos</summary>
+            <div id="zonaLlaves" style="margin-top:12px">
+              <button class="boton tenue" id="btnLlaves">Generar llaves nuevas</button></div>
+          </details>` : `
+          <ol style="margin:0 0 14px 20px;line-height:1.7">
+            <li>Pulsa <b>Generar llaves</b>.</li>
+            <li>En Supabase entra a <b>Edge Functions → Secrets</b> y agrega los tres secretos
+              que aparecen abajo, con esos nombres exactos.</li>
+            <li>Regresa aquí y recarga la página: el estado debe decir <b>Listo</b>.</li>
+          </ol>
+          <div id="zonaLlaves"><button class="boton" id="btnLlaves">Generar llaves</button></div>`}
+      </div>
+    </div>`;
+
+  const bp = $('#btnPrueba');
+  if(bp) bp.addEventListener('click', async () => {
+    const matricula = $('#pzMatricula').value.trim();
+    if(!matricula){ recado('#recadoPrueba', 'Escribe una matrícula.'); return; }
+    bp.disabled = true; bp.textContent = 'Enviando…';
+    const res = await api('push_prueba', {matricula});
+    bp.disabled = false; bp.textContent = 'Enviar prueba';
+    if(!res.ok){ recado('#recadoPrueba', res.error); return; }
+    recado('#recadoPrueba', res.enviados
+      ? `Enviada a ${res.enviados} de ${res.dispositivos} teléfono${res.dispositivos === 1 ? '' : 's'}.`
+      : 'No se pudo entregar. Puede que el alumno haya quitado el permiso; que lo active de nuevo.',
+      res.enviados ? 'bien' : 'ojo');
+  });
+
+  $('#btnLlaves').addEventListener('click', generarLlavesVapid);
+}
+
+async function generarLlavesVapid(){
+  const b64u = buf => btoa(String.fromCharCode(...new Uint8Array(buf)))
+    .replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+  const par = await crypto.subtle.generateKey({name:'ECDSA', namedCurve:'P-256'}, true, ['sign','verify']);
+  const publica = b64u(await crypto.subtle.exportKey('raw', par.publicKey));
+  const privada = (await crypto.subtle.exportKey('jwk', par.privateKey)).d;
+  const correo = (sesion.admin?.correo || '').includes('@') ? sesion.admin.correo : 'tu-correo@ejemplo.com';
+
+  const fila = (nombre, valor, nota, editable) => `
+    <div style="margin-bottom:12px">
+      <div style="font-size:12px;color:var(--texto-suave);margin-bottom:3px">Nombre del secreto</div>
+      <code style="font-weight:700">${nombre}</code>
+      <div style="display:flex;gap:8px;margin-top:6px">
+        <input ${editable ? '' : 'readonly onclick="this.select()"'} value="${escapar(valor)}" style="flex:1;font-family:monospace;font-size:12px;padding:7px 9px;
+          border:1.5px solid var(--linea-fuerte);border-radius:7px">
+        <button class="boton tenue chico copiar">Copiar</button>
+      </div>
+      ${nota ? `<div style="font-size:12px;color:var(--texto-suave);margin-top:4px">${nota}</div>` : ''}
+    </div>`;
+
+  $('#zonaLlaves').innerHTML = `
+    <div class="recado ojo" style="margin:0 0 14px">Copia las tres ahora: al salir de esta pantalla
+      la llave privada se pierde. No la compartas ni la pegues en otro lugar que no sea Supabase.</div>
+    ${fila('VAPID_PUBLIC_KEY', publica)}
+    ${fila('VAPID_PRIVATE_KEY', privada)}
+    ${fila('VAPID_SUBJECT', 'mailto:' + correo, 'Escribe aquí un correo real de la escuela antes de copiarlo. Debe empezar con «mailto:».', true)}`;
+
+  $$('#zonaLlaves .copiar').forEach(b => b.addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(b.previousElementSibling.value.trim()); b.textContent = '¡Copiada!'; }
+    catch(_){ b.previousElementSibling.select(); b.textContent = 'Usa Ctrl+C'; }
+    setTimeout(() => b.textContent = 'Copiar', 1800);
+  }));
+}
+
+/* ==========================================================================
    HORARIOS  ·  una imagen por grupo
 
    La imagen se reduce y se convierte a JPEG en el navegador antes de subirla,
@@ -3372,6 +3516,7 @@ async function formReporte(fila){
 
        if(!r.ok){ recado('#recadoRep', r.error); return; }
        cerrarVentana(); irA('reportes');
+       if(r.notificados) avisoEnviado(r.notificados);
      }}]);
 }
 
