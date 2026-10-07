@@ -258,6 +258,7 @@ table.datos input.celda:focus{outline:2px solid var(--cian);outline-offset:0;bor
 
       <div class="menu-grupo">Académico</div>
       <button data-vista="asignaciones"><span class="ic">◧</span> Materias por grupo</button>
+      <button data-vista="modulos"><span class="ic">⧉</span> Módulos</button>
       <button data-vista="horarios"><span class="ic">▤</span> Horarios</button>
 
       <div class="menu-grupo">Catálogos</div>
@@ -341,6 +342,39 @@ function fecha(f){
   return isNaN(d) ? f : d.toLocaleDateString('es-MX',{day:'2-digit',month:'short',year:'numeric'});
 }
 function nota(v){ return (v===null||v===undefined||v==='') ? '—' : Number(v).toFixed(1); }
+
+/* Calificaciones que no son número (AC = acreditado) se muestran tal cual.
+   El final toma el texto de la columna CALIFICACION o del último parcial. */
+function textoCalif(c, campo){
+  if(campo === 'calificacion_final' || campo === 'general')
+    return c.final_txt || c.p3_txt || c.p2_txt || c.p1_txt || null;
+  return c[campo + '_txt'] || null;
+}
+function notaC(c, campo){
+  const v = c[campo];
+  if(v !== null && v !== undefined && v !== ''){
+    const n = Math.round(Number(v) * 100) / 100;
+    return Number.isInteger(n * 10) ? n.toFixed(1) : n.toFixed(2);
+  }
+  return escapar(textoCalif(c, campo) ?? '—');
+}
+/* Ordena la boleta: cada módulo seguido de sus submódulos */
+function ordenarBoleta(filas){
+  const ids = new Set(filas.map(f => f.materia_id));
+  const subs = new Map(), resto = [];
+  filas.forEach(f => {
+    if(f.es_submodulo && ids.has(f.modulo_id)){
+      if(!subs.has(f.modulo_id)) subs.set(f.modulo_id, []);
+      subs.get(f.modulo_id).push(f);
+    } else resto.push(f);
+  });
+  const salida = [];
+  resto.sort((a,b) => cmp(a.materia, b.materia)).forEach(f => {
+    salida.push(f);
+    (subs.get(f.materia_id) || []).sort((a,b) => cmp(a.materia, b.materia)).forEach(x => salida.push(x));
+  });
+  return salida;
+}
 function recado(donde, texto, tipo='mal'){
   const el = $(donde); if(!el) return;
   el.innerHTML = texto ? `<div class="recado ${tipo}">${escapar(texto)}</div>` : '';
@@ -562,7 +596,7 @@ function ordenarPorMateria(filas){
 const TITULOS = {
   tablero:'Tablero', alumnos:'Alumnos', documentos:'Documentos',
   reportes:'Reportes', asignaciones:'Materias por grupo',
-  horarios:'Horarios', grupos:'Grupos', materias:'Materias', docentes:'Docentes',
+  horarios:'Horarios', grupos:'Grupos', materias:'Materias', docentes:'Docentes', modulos:'Módulos y submódulos',
   carreras:'Carreras', periodos:'Periodos', avisos:'Avisos',
   importar:'Importar Excel', asistencia:'Asistencia', respaldo:'Respaldo de datos',
   cierre:'Cierre de ciclo', clave:'Mi contraseña'
@@ -605,6 +639,7 @@ async function irA(vista){
     else if(vista==='respaldo')       await verRespaldo();
     else if(vista==='cierre')         await verCierre();
     else if(vista==='materias')       await verMaterias();
+    else if(vista==='modulos')        await verModulos();
     else if(vista==='docentes')       await verDocentes();
     else if(vista==='avisos')         await verCatalogo('avisos');
     else if(vista==='clave')          verClave();
@@ -740,6 +775,7 @@ function estadisticaModo(modo){
 
   for(const c of filas){
     const v = califSegunModo(c, modo);
+    const esSub = !!c.es_submodulo;
     const mat = String(c.matricula);
     const al = alumnos.get(mat);
     const grupo = al?.grupo_id ? buscaEn('grupos', al.grupo_id) : null;
@@ -755,25 +791,30 @@ function estadisticaModo(modo){
       inscritas: 0, calificadas: 0, suma: 0, reprobadas: []
     });
     const a = porAlumno.get(mat);
-    a.inscritas++;
+    const docente = c.docente || null;
+    const det = {materia: c.materia ?? '—', docente: docente ?? 'Sin docente', calif: v};
 
-    if(v === null){ dist[0]++; continue; }
+    // Por docente: cada quien responde por lo que califica, así que cuentan
+    // los submódulos y no el módulo, cuya calificación es un promedio.
+    if(v !== null && docente && !c.es_modulo){
+      if(!porDocente.has(docente)) porDocente.set(docente, {docente, total:0, reprobadas:[]});
+      porDocente.get(docente).total++;
+      if(v < 6) porDocente.get(docente).reprobadas.push({...det,
+        alumno: a.alumno, matricula: mat, grupo: a.grupo, semestre: a.semestre, grupoObj: a.grupoObj, orden: a.orden});
+    }
+
+    // Para todo lo demás el submódulo no cuenta: cuenta su módulo.
+    // Lo que trae letra (AC) no entra al promedio ni cuenta como pendiente.
+    if(esSub) continue;
+    if(v === null){
+      if(!textoCalif(c, modo)){ a.inscritas++; dist[0]++; }
+      continue;
+    }
+    a.inscritas++;
     calificadas++; suma += v;
     a.calificadas++; a.suma += v;
     dist[v < 6 ? 1 : v < 7 ? 2 : v < 8 ? 3 : v < 9 ? 4 : 5]++;
-
-    const docente = c.docente || null;
-    if(docente){
-      if(!porDocente.has(docente)) porDocente.set(docente, {docente, total:0, reprobadas:[]});
-      porDocente.get(docente).total++;
-    }
-    if(v < 6){
-      reprobadas++;
-      const det = {materia: c.materia ?? '—', docente: docente ?? 'Sin docente', calif: v};
-      a.reprobadas.push(det);
-      if(docente) porDocente.get(docente).reprobadas.push({...det,
-        alumno: a.alumno, matricula: mat, grupo: a.grupo, semestre: a.semestre, grupoObj: a.grupoObj, orden: a.orden});
-    }
+    if(v < 6){ reprobadas++; a.reprobadas.push(det); }
   }
 
   const listaAlumnos = [...porAlumno.values()];
@@ -964,7 +1005,8 @@ function pintarTablero(){
       </table></div>
       <p class="aviso-nota" style="padding:0 17px 15px">Cada parcial cuenta solo las materias que ya
         tienen calificación en ese parcial. El general usa la calificación final, o el promedio
-        de los parciales capturados mientras no la haya.</p>
+        de los parciales capturados mientras no la haya. Los submódulos cuentan a través de su
+        módulo y las materias con letra (AC) no entran al promedio.</p>
     </div>` : ''}
 
     <div class="tarjeta" style="margin-top:22px">
@@ -2046,8 +2088,9 @@ async function verFicha(id){
 
     <div id="ft_c" class="oculto">${r.calificaciones.length ? (() => {
       // Promedio de cada parcial, contando solo lo que ya tiene número
+      const filasC = ordenarBoleta(r.calificaciones);
       const prom = campo => {
-        const v = r.calificaciones.map(c => c[campo])
+        const v = r.calificaciones.filter(c => !c.es_submodulo).map(c => c[campo])
                    .filter(x => x !== null && x !== undefined && x !== '');
         return v.length ? (v.reduce((s,x) => s + Number(x), 0) / v.length).toFixed(1) : null;
       };
@@ -2057,12 +2100,19 @@ async function verFicha(id){
       return `
       <div class="tabla-marco"><table class="datos" style="min-width:0">
         <thead><tr><th>Materia</th><th class="n">P1</th><th class="n">P2</th><th class="n">P3</th><th class="n">Final</th></tr></thead>
-        <tbody>${r.calificaciones.map(c => `<tr class="franja ${
-            c.calificacion_final === null || c.calificacion_final === undefined ? 'espera'
+        <tbody>${filasC.map(c => c.es_submodulo && filasC.some(x => x.materia_id === c.modulo_id)
+          ? `<tr style="color:var(--texto-suave);font-size:12.5px">
+              <td style="padding-left:28px">↳ ${escapar(c.materia)}</td><td class="n">${notaC(c,'p1')}</td>
+              <td class="n">${notaC(c,'p2')}</td><td class="n">${notaC(c,'p3')}</td>
+              <td class="n">${notaC(c,'calificacion_final')}</td></tr>`
+          : `<tr class="franja ${
+            c.calificacion_final === null || c.calificacion_final === undefined
+              ? (textoCalif(c,'calificacion_final') === 'AC' ? 'va' : 'espera')
             : Number(c.calificacion_final) < 6 ? 'cae'
             : Number(c.calificacion_final) < 7 ? 'riesgo' : 'va'}">
-          <td>${escapar(c.materia)}</td><td class="n">${nota(c.p1)}</td><td class="n">${nota(c.p2)}</td>
-          <td class="n">${nota(c.p3)}</td><td class="n"><b>${nota(c.calificacion_final)}</b></td></tr>`).join('')}
+          <td>${escapar(c.materia)}${c.es_modulo ? ' <span class="sello info">Módulo</span>' : ''}</td>
+          <td class="n">${notaC(c,'p1')}</td><td class="n">${notaC(c,'p2')}</td>
+          <td class="n">${notaC(c,'p3')}</td><td class="n"><b>${notaC(c,'calificacion_final')}</b></td></tr>`).join('')}
         </tbody>
         <tfoot><tr style="background:#EDF2EB;font-weight:700">
           <td>Promedio</td>
@@ -2073,7 +2123,8 @@ async function verFicha(id){
         </tr></tfoot>
       </table></div>
       <p class="aviso-nota">Cada promedio cuenta solo las materias que ya tienen
-      calificación en ese parcial.</p>`;
+      calificación en ese parcial. Los submódulos (en gris) cuentan a través de su
+      módulo, y las materias con letra (AC) no entran al promedio.</p>`;
     })() : '<div class="vacio"><p>Sin calificaciones capturadas.</p></div>'}</div>
 
     <div id="ft_a" class="oculto">
@@ -2569,6 +2620,233 @@ function formAsignacion(fila, grupoInicial){
        if(esNuevo) grupoAsigElegido = registro.grupo_id;
        cerrarVentana(); irA('asignaciones');
      }}]);
+}
+
+/* ==========================================================================
+   MÓDULOS Y SUBMÓDULOS
+
+   Algunas materias del Excel son módulos: no traen calificación propia en
+   los parciales; la sacan del promedio de sus submódulos. Aquí se arrastra
+   cada submódulo a su módulo. La relación vive en la tabla materia_modulo y
+   la vista v_calificaciones hace el cálculo, así que el cambio se ve de
+   inmediato en el tablero y en el portal del alumno.
+
+   Funciona arrastrando con el mouse o, en el teléfono, tocando una materia
+   y luego el lugar a donde va.
+   ========================================================================== */
+let modCarrera = null, modSemestre = null;
+let modVacios = new Set();     // módulos recién creados que aún no tienen submódulos
+let modElegida = null;         // materia tocada (modo sin arrastre)
+let modEstado = null;          // lo que necesita el detector de clics, del último pintado
+
+async function verModulos(){
+  const r = await api('listar', {tabla:'materia_modulo', limite:2000});
+  if(!r.ok) throw new Error(r.error.includes('permitida')
+    ? 'Falta actualizar la función admin-api a la versión 23 y correr el SQL de módulos.' : r.error);
+  pintarModulos(r.datos);
+
+  // Un solo detector de clics por visita: el contenedor se repinta muchas
+  // veces y, si se agregara en cada pintado, cada toque contaría doble.
+  $('#vista').addEventListener('click', ev => {
+    if(vistaActual !== 'modulos' || !modEstado) return;
+    const {relaciones, relDe, subsDe, nombreDe, mover} = modEstado;
+    const q = ev.target.closest('.quitarModulo');
+    if(q){
+      const id = Number(q.dataset.id);
+      const subs = subsDe.get(id) || [];
+      if(subs.length && !confirm(`¿Deshacer el módulo «${nombreDe(id)}»? Sus ${subs.length} submódulos regresan a la lista.`)) return;
+      (async () => {
+        for(const s of subs){
+          const rel = relDe.get(s);
+          if(rel){ const r = await api('eliminar', {tabla:'materia_modulo', id: rel.id}); if(!r.ok){ recado('#recadoMod', r.error); break; } }
+        }
+        modVacios.delete(id);
+        const r = await api('listar', {tabla:'materia_modulo', limite:2000});
+        pintarModulos(r.ok ? r.datos : relaciones);
+      })();
+      return;
+    }
+    // Con una materia ya elegida, tocar cualquier parte de otro recuadro
+    // (aunque sea encima de otra materia o del título del módulo) la mueve ahí.
+    const z = ev.target.closest('.zona') || ev.target.closest('.mod-caja')?.querySelector('.zona');
+    const c = ev.target.closest('.mat-chip');
+    if(modElegida && z){
+      const origen = document.querySelector(`#vista .mat-chip[data-id="${modElegida}"]`)?.closest('.zona');
+      if(z !== origen){ mover(modElegida, z.dataset.destino); return; }
+    }
+    if(c){
+      const id = Number(c.dataset.id);
+      modElegida = modElegida === id ? null : id;
+      $$('#vista .mat-chip').forEach(x => x.classList.toggle('elegida', Number(x.dataset.id) === modElegida));
+    }
+  });
+}
+
+function pintarModulos(relaciones){
+  const materias = lookups.materias || [];
+  const relDe = new Map(relaciones.map(x => [x.submateria_id, x]));
+
+  // Carreras y semestres que tienen materias
+  const carreras = [...new Set(materias.map(m => m.carrera_id ?? 0))]
+    .map(id => ({id, nombre: id ? etiquetaRef('carreras', id) : 'Sin carrera'}))
+    .sort((a,b) => cmp(a.nombre, b.nombre));
+  if(!carreras.some(c => c.id === modCarrera)) modCarrera = carreras[0]?.id ?? null;
+  const semestres = [...new Set(materias.filter(m => (m.carrera_id ?? 0) === modCarrera).map(m => m.semestre))]
+    .sort((a,b) => a - b);
+  if(!semestres.includes(modSemestre)) modSemestre = semestres[0] ?? null;
+
+  const aqui = materias.filter(m => (m.carrera_id ?? 0) === modCarrera && m.semestre === modSemestre)
+    .sort((a,b) => cmp(a.nombre, b.nombre));
+  const idsAqui = new Set(aqui.map(m => m.id));
+
+  // Módulos: los que tienen submódulos, más los recién creados
+  const subsDe = new Map();
+  relaciones.forEach(x => {
+    if(!idsAqui.has(x.modulo_id)) return;
+    if(!subsDe.has(x.modulo_id)) subsDe.set(x.modulo_id, []);
+    subsDe.get(x.modulo_id).push(x.submateria_id);
+  });
+  modVacios.forEach(id => { if(subsDe.has(id) || !idsAqui.has(id) || relDe.has(id)) modVacios.delete(id); });
+  const modulos = aqui.filter(m => subsDe.has(m.id) || modVacios.has(m.id));
+  const idsModulo = new Set(modulos.map(m => m.id));
+  const sueltas = aqui.filter(m => !idsModulo.has(m.id) && !relDe.has(m.id));
+
+  // Los nombres en mayúsculas suelen ser módulos
+  const pareceModulo = n => /[A-ZÁÉÍÓÚÑ]{4}/.test(n) && n === n.toUpperCase();
+  const nombreDe = id => materias.find(m => m.id === id)?.nombre ?? '—';
+
+  const chip = (m, extra = '') => `<div class="mat-chip${modElegida === m.id ? ' elegida' : ''}" draggable="true"
+      data-id="${m.id}" title="Arrastra o toca para mover">
+      <span class="asa">⋮⋮</span><span class="txt">${escapar(m.nombre)}</span>${extra}</div>`;
+
+  $('#vista').innerHTML = `
+    <style>
+      .mod-rejilla{display:grid;grid-template-columns:minmax(260px,1fr) minmax(320px,1.4fr);gap:18px;align-items:start}
+      @media (max-width:900px){.mod-rejilla{grid-template-columns:1fr}}
+      .mat-chip{display:flex;align-items:center;gap:8px;padding:9px 11px;margin:0 0 7px;background:#fff;
+        border:1px solid var(--linea);border-radius:9px;font-size:13px;cursor:grab;user-select:none;line-height:1.3}
+      .mat-chip:hover{border-color:var(--linea-fuerte)}
+      .mat-chip.elegida{border-color:var(--verde);box-shadow:0 0 0 2px rgba(31,122,63,.25)}
+      .mat-chip.arrastrando{opacity:.4}
+      .mat-chip .asa{color:var(--linea-fuerte);font-size:12px;letter-spacing:-2px}
+      .mat-chip .txt{flex:1}
+      .mat-chip .tag{font-size:10.5px;color:var(--ambar);font-weight:650;white-space:nowrap}
+      .zona{border:1.5px dashed transparent;border-radius:11px;transition:background .12s,border-color .12s}
+      .zona.encima{border-color:var(--verde);background:#EEF6EF}
+      .mod-caja{border:1px solid var(--linea);border-radius:12px;background:#F8FAF7;margin-bottom:14px;overflow:hidden}
+      .mod-caja .cab{padding:11px 14px;background:#fff;border-bottom:1px solid var(--linea);display:flex;gap:10px;align-items:center}
+      .mod-caja .cab b{flex:1;font-size:13.5px}
+      .mod-caja .cab .n{font-size:11.5px;color:var(--texto-suave);white-space:nowrap}
+      .mod-caja .cab button{border:none;background:none;color:var(--texto-suave);cursor:pointer;font-size:12px}
+      .mod-caja .zona{margin:10px;min-height:50px;padding:6px}
+      .mod-caja .zona .mat-chip{background:#fff;color:var(--texto-suave)}
+      .vacia{font-size:12.5px;color:var(--texto-suave);text-align:center;padding:12px 6px}
+      .zona-nuevo{padding:16px;text-align:center;font-size:13px;color:var(--texto-suave);
+        border:1.5px dashed var(--linea-fuerte);border-radius:12px;margin-bottom:14px;background:#fff}
+    </style>
+
+    <div class="herramientas" style="display:flex;flex-wrap:wrap;gap:12px;align-items:center">
+      <label style="display:flex;gap:8px;align-items:center;font-size:13.5px"><b>Carrera</b>
+        <select id="modCarrera" style="padding:7px 10px;border:1.5px solid var(--linea-fuerte);border-radius:8px">
+          ${carreras.map(c => `<option value="${c.id}"${c.id === modCarrera ? ' selected' : ''}>${escapar(c.nombre)}</option>`).join('')}
+        </select></label>
+      <label style="display:flex;gap:8px;align-items:center;font-size:13.5px"><b>Semestre</b>
+        <select id="modSemestre" style="padding:7px 10px;border:1.5px solid var(--linea-fuerte);border-radius:8px">
+          ${semestres.map(s => `<option value="${s}"${s === modSemestre ? ' selected' : ''}>${s}°</option>`).join('')}
+        </select></label>
+    </div>
+    <p style="font-size:13px;color:var(--texto-suave);max-width:80ch;margin:0 0 16px">
+      1. Arrastra la materia que es <b>módulo</b> al recuadro punteado de la derecha.
+      2. Arrastra cada <b>submódulo</b> dentro de su módulo. Para deshacer, regrésalo a la lista.
+      En el teléfono: toca una materia y luego toca a dónde va.
+      En cada parcial el módulo vale el promedio de sus submódulos; al final, la calificación del Excel si la trae.
+    </p>
+    <div id="recadoMod"></div>
+
+    <div class="mod-rejilla">
+      <div class="tarjeta">
+        <h3>Materias <span style="font-weight:400;color:var(--texto-suave)">(${sueltas.length})</span></h3>
+        <div class="cuerpo zona" data-destino="suelta" style="min-height:120px">
+          ${sueltas.length ? sueltas.map(m => chip(m, pareceModulo(m.nombre) ? '<span class="tag">¿módulo?</span>' : '')).join('')
+            : '<div class="vacia">Todas las materias de este semestre ya están acomodadas.</div>'}
+        </div>
+      </div>
+
+      <div>
+        <div class="zona zona-nuevo" data-destino="nuevo">＋ Suelta aquí una materia para convertirla en <b>módulo</b></div>
+        ${modulos.map(m => {
+          const subs = (subsDe.get(m.id) || []).map(id => materias.find(x => x.id === id)).filter(Boolean)
+            .sort((a,b) => cmp(a.nombre, b.nombre));
+          return `<div class="mod-caja">
+            <div class="cab"><b>${escapar(m.nombre)}</b>
+              <span class="n">${subs.length} submódulo${subs.length === 1 ? '' : 's'}</span>
+              <button class="quitarModulo" data-id="${m.id}" title="Ya no es módulo: sus submódulos regresan a la lista">✕ Deshacer</button></div>
+            <div class="zona" data-destino="${m.id}">
+              ${subs.length ? subs.map(s => chip(s)).join('') : '<div class="vacia">Arrastra aquí sus submódulos</div>'}
+            </div>
+          </div>`;
+        }).join('')}
+      </div>
+    </div>`;
+
+  /* --- Mover una materia a un destino --- */
+  const mover = async (id, destino) => {
+    modElegida = null;
+    const rel = relDe.get(id);
+    try{
+      if(destino === 'nuevo'){
+        if(subsDe.has(id) || modVacios.has(id)) return pintarModulos(relaciones);
+        if(rel){ const r = await api('eliminar', {tabla:'materia_modulo', id: rel.id}); if(!r.ok) throw new Error(r.error); }
+        modVacios.add(id);
+      } else if(destino === 'suelta'){
+        if(rel){ const r = await api('eliminar', {tabla:'materia_modulo', id: rel.id}); if(!r.ok) throw new Error(r.error); }
+        else if(modVacios.has(id)) modVacios.delete(id);
+        else if(subsDe.has(id)) throw new Error('Para quitar un módulo usa «Deshacer» en su recuadro.');
+      } else {
+        const modulo = Number(destino);
+        if(modulo === id) return pintarModulos(relaciones);
+        if(subsDe.has(id)) throw new Error(`«${nombreDe(id)}» es un módulo con submódulos; no puede quedar dentro de otro.`);
+        modVacios.delete(id);
+        if(rel){
+          if(rel.modulo_id === modulo) return pintarModulos(relaciones);
+          const r = await api('actualizar', {tabla:'materia_modulo', id: rel.id, cambios:{modulo_id: modulo}});
+          if(!r.ok) throw new Error(r.error);
+        } else {
+          const r = await api('crear', {tabla:'materia_modulo', registro:{submateria_id: id, modulo_id: modulo}});
+          if(!r.ok) throw new Error(r.error);
+        }
+      }
+      const r = await api('listar', {tabla:'materia_modulo', limite:2000});
+      if(vistaActual === 'modulos') pintarModulos(r.ok ? r.datos : relaciones);
+    }catch(err){
+      pintarModulos(relaciones);
+      recado('#recadoMod', err.message || String(err));
+    }
+  };
+
+  /* --- Arrastre con mouse --- */
+  $$('#vista .mat-chip').forEach(el => {
+    el.addEventListener('dragstart', ev => {
+      ev.dataTransfer.setData('text/plain', el.dataset.id);
+      ev.dataTransfer.effectAllowed = 'move';
+      el.classList.add('arrastrando');
+    });
+    el.addEventListener('dragend', () => el.classList.remove('arrastrando'));
+  });
+  $$('#vista .zona').forEach(z => {
+    z.addEventListener('dragover', ev => { ev.preventDefault(); z.classList.add('encima'); });
+    z.addEventListener('dragleave', ev => { if(!z.contains(ev.relatedTarget)) z.classList.remove('encima'); });
+    z.addEventListener('drop', ev => {
+      ev.preventDefault(); z.classList.remove('encima');
+      const id = Number(ev.dataTransfer.getData('text/plain'));
+      if(id) mover(id, z.dataset.destino);
+    });
+  });
+
+  modEstado = {relaciones, relDe, subsDe, nombreDe, mover};
+
+  $('#modCarrera').addEventListener('change', e => { modCarrera = Number(e.target.value); modSemestre = null; modElegida = null; pintarModulos(relaciones); });
+  $('#modSemestre').addEventListener('change', e => { modSemestre = Number(e.target.value); modElegida = null; pintarModulos(relaciones); });
 }
 
 /* ==========================================================================
@@ -4028,9 +4306,12 @@ async function verRespaldo(){
 
   $('#btnRespCalif').addEventListener('click', () =>
     bajar('#btnRespCalif', '#avisoCalif', async () => {
-      const filas = await traerTodo('v_calificaciones', 'id');
+      const filas = (await traerTodo('v_calificaciones', 'id')).map(c => ({...c,
+        p1: c.p1 ?? c.p1_txt, p2: c.p2 ?? c.p2_txt, p3: c.p3 ?? c.p3_txt,
+        calificacion_final: c.calificacion_final ?? textoCalif(c, 'calificacion_final'),
+        tipo: c.es_modulo ? 'MÓDULO' : c.es_submodulo ? 'SUBMÓDULO' : 'MATERIA'}));
       exportarCSV('calificaciones', filas,
-        ['matricula','alumno','grupo','semestre','periodo','materia','docente',
+        ['matricula','alumno','grupo','semestre','periodo','tipo','materia','docente',
          'p1','p2','p3','ext1','ext2','csd','promedio_parciales','calificacion_final','situacion']);
     }));
 

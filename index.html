@@ -514,6 +514,43 @@ function nota(v){
   return Number(v).toFixed(1);
 }
 
+/* Las materias con letra (AC = acreditado) se muestran tal cual. El final
+   toma el texto de la columna CALIFICACION o del último parcial. */
+function textoCalif(c, campo){
+  if (campo === 'calificacion_final') return c.final_txt || c.p3_txt || c.p2_txt || c.p1_txt || null;
+  return c[campo + '_txt'] || null;
+}
+function notaC(c, campo){
+  const v = c[campo];
+  if (v !== null && v !== undefined && v !== '') {
+    const n = Math.round(Number(v) * 100) / 100;
+    return Number.isInteger(n * 10) ? n.toFixed(1) : n.toFixed(2);
+  }
+  return escapar(textoCalif(c, campo) ?? '—');
+}
+/* Lo que cuenta para el promedio: materias y módulos, no submódulos */
+function cuentanPromedio(lista){
+  return lista.filter(c => !c.es_submodulo);
+}
+/* Cada módulo seguido de sus submódulos */
+const cmpTxt = (a, b) => String(a ?? '').localeCompare(String(b ?? ''), 'es', {sensitivity:'base'});
+function ordenarBoleta(filas){
+  const ids = new Set(filas.map(f => f.materia_id));
+  const subs = new Map(), resto = [];
+  filas.forEach(f => {
+    if (f.es_submodulo && ids.has(f.modulo_id)) {
+      if (!subs.has(f.modulo_id)) subs.set(f.modulo_id, []);
+      subs.get(f.modulo_id).push(f);
+    } else resto.push(f);
+  });
+  const salida = [];
+  resto.sort((a, b) => cmpTxt(a.materia, b.materia)).forEach(f => {
+    salida.push(f);
+    (subs.get(f.materia_id) || []).sort((a, b) => cmpTxt(a.materia, b.materia)).forEach(x => salida.push(x));
+  });
+  return salida;
+}
+
 /* ==========================================================================
    ACCESO
    ========================================================================== */
@@ -727,12 +764,12 @@ async function verInicio(){
     traer('documentos', true), traer('avisos')
   ]);
 
-  const notas = calif.calificaciones
+  const notas = cuentanPromedio(calif.calificaciones)
     .map(c => c.calificacion_final)
     .filter(v => v !== null && v !== undefined);
   const promedio = notas.length
     ? (notas.reduce((s,v) => s + Number(v), 0) / notas.length).toFixed(1) : null;
-  const reprobadas = calif.calificaciones.filter(c => c.calificacion_final !== null && Number(c.calificacion_final) < 6).length;
+  const reprobadas = cuentanPromedio(calif.calificaciones).filter(c => c.calificacion_final !== null && c.calificacion_final !== undefined && Number(c.calificacion_final) < 6).length;
 
   const ra = asis.resumen || {};
   const porcAsis = ra.dias_registrados ? Number(ra.porcentaje_asistencia) : null;
@@ -1166,14 +1203,26 @@ async function verCalificaciones(){
     return '<span class="sello va">Acreditada</span>';
   };
 
-  const notas = c.map(x => x.calificacion_final).filter(v => v !== null && v !== undefined);
+  const notas = cuentanPromedio(c).map(x => x.calificacion_final).filter(v => v !== null && v !== undefined);
+  const filas = ordenarBoleta(c);
+  const conModulo = new Set(filas.filter(x => x.es_submodulo && filas.some(y => y.materia_id === x.modulo_id)).map(x => x.id));
+  const selloDe = x => {
+    if (x.calificacion_final === null || x.calificacion_final === undefined) {
+      const t = textoCalif(x, 'calificacion_final');
+      if (t === 'AC') return '<span class="sello va">Acreditada</span>';
+      if (t) return `<span class="sello espera">${escapar(t)}</span>`;
+    }
+    return sello(x.calificacion_final);
+  };
+  const claseDe = x => (x.calificacion_final === null || x.calificacion_final === undefined)
+    && textoCalif(x, 'calificacion_final') === 'AC' ? 'va' : clase(x.calificacion_final);
   const prom = notas.length ? (notas.reduce((s,v) => s+Number(v),0)/notas.length).toFixed(1) : '—';
 
   $('#vista').innerHTML = `
     <div class="medidores" style="margin-top:0">
       <div class="medidor bien"><div class="r">Promedio</div><div class="v">${prom}</div>
         <div class="n">de ${notas.length} materia${notas.length===1?'':'s'}</div></div>
-      <div class="medidor"><div class="r">Materias inscritas</div><div class="v">${c.length}</div>
+      <div class="medidor"><div class="r">Materias inscritas</div><div class="v">${cuentanPromedio(c).length}</div>
         <div class="n">${escapar(c[0].periodo)} · grupo ${escapar(c[0].grupo)}</div></div>
     </div>
 
@@ -1186,15 +1235,24 @@ async function verCalificaciones(){
             <th class="n">Ext</th><th class="n">Final</th><th>Estado</th><th>Docente</th>
           </tr></thead>
           <tbody>
-            ${c.map(x => `<tr class="franja ${clase(x.calificacion_final)}">
-              <td><b>${escapar(x.materia)}</b></td>
-              <td class="n">${nota(x.p1)}</td>
-              <td class="n">${nota(x.p2)}</td>
-              <td class="n">${nota(x.p3)}</td>
+            ${filas.map(x => conModulo.has(x.id) ? `<tr style="color:var(--texto-suave);font-size:13px;opacity:.85">
+              <td style="padding-left:30px">↳ ${escapar(x.materia)}</td>
+              <td class="n">${notaC(x,'p1')}</td>
+              <td class="n">${notaC(x,'p2')}</td>
+              <td class="n">${notaC(x,'p3')}</td>
               <td class="n">${nota(x.ext2 ?? x.ext1)}</td>
-              <td class="n"><b>${nota(x.calificacion_final)}</b></td>
-              <td>${sello(x.calificacion_final)}</td>
-              <td style="color:var(--texto-suave);font-size:13px">${escapar(x.docente)}</td>
+              <td class="n">${notaC(x,'calificacion_final')}</td>
+              <td style="font-size:12px">Submódulo</td>
+              <td style="font-size:12.5px">${escapar(x.docente ?? '')}</td>
+            </tr>` : `<tr class="franja ${claseDe(x)}">
+              <td><b>${escapar(x.materia)}</b>${x.es_modulo ? ' <span class="sello info">Módulo</span>' : ''}</td>
+              <td class="n">${notaC(x,'p1')}</td>
+              <td class="n">${notaC(x,'p2')}</td>
+              <td class="n">${notaC(x,'p3')}</td>
+              <td class="n">${nota(x.ext2 ?? x.ext1)}</td>
+              <td class="n"><b>${notaC(x,'calificacion_final')}</b></td>
+              <td>${selloDe(x)}</td>
+              <td style="color:var(--texto-suave);font-size:13px">${escapar(x.docente ?? '')}</td>
             </tr>`).join('')}
           </tbody>
         </table>
@@ -1202,7 +1260,9 @@ async function verCalificaciones(){
     </div>
     <p style="margin-top:14px;font-size:13px;color:var(--texto-suave);max-width:70ch">
       La calificación final toma el promedio de los parciales capturados. Si presentaste
-      extraordinario, se usa la calificación más alta de los dos. Las asignaturas que
+      extraordinario, se usa la calificación más alta de los dos. Cada módulo se califica
+      con el promedio de sus submódulos (en gris), y es el módulo el que cuenta para tu
+      promedio. Las materias acreditadas con letra (AC) no entran al promedio. Las asignaturas que
       todavía no tienen docente asignado aparecerán aquí en cuanto Control Escolar
       lo registre.
     </p>`;
