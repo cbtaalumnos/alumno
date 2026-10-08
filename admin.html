@@ -94,6 +94,22 @@ a{color:var(--verde)}
   border-bottom:1px solid var(--linea);padding:12px 26px;display:flex;align-items:center;gap:14px}
 .barra h2{font-size:18px;font-variation-settings:'wdth' 108}
 .barra .yo{text-align:right;line-height:1.25}
+/* Modo consulta (rol VISOR): se esconde todo lo que modifica datos.
+   Aunque alguien lo forzara, el servidor rechaza esas acciones. */
+#menu .solo-admin{display:none}
+body.es-admin #menu .solo-admin{display:flex}
+.etiqueta-consulta{display:none;padding:4px 11px;border-radius:999px;background:#FDF3E2;color:#7A5312;
+  font-size:12px;font-weight:650;white-space:nowrap}
+body.visor .etiqueta-consulta{display:inline-block}
+body.visor #menu button[data-vista="importar"],
+body.visor #menu button[data-vista="cierre"],
+body.visor #menu button[data-vista="notificaciones"],
+body.visor .editar, body.visor .borrar, body.visor .editarRep, body.visor .borrarRep,
+body.visor .borrarJornada, body.visor .borrarH, body.visor .archivoH, body.visor .reset,
+body.visor .renombrar, body.visor .quitarModulo, body.visor .zona-nuevo,
+body.visor #btnBorrarSel, body.visor #btnNuevo, body.visor #btnNuevoAlumno, body.visor #btnNuevoRep,
+body.visor #btnNuevaAsig, body.visor #btnImportar, body.visor #chkTodos, body.visor .chkFila,
+body.visor .tarjeta:has(#archAsist), body.visor label:has(#selUmbral){display:none !important}
 .campana{margin-left:auto;position:relative;width:40px;height:40px;border-radius:50%;
   border:1.5px solid var(--linea);background:#fff;cursor:pointer;display:grid;place-items:center;
   color:var(--texto-suave);transition:background .15s,color .15s}
@@ -273,6 +289,7 @@ table.datos input.celda:focus{outline:2px solid var(--cian);outline-offset:0;bor
       <button data-vista="notificaciones"><span class="ic">◔</span> Notificaciones</button>
 
       <div class="menu-grupo">Cuenta</div>
+      <button data-vista="usuarios" class="solo-admin"><span class="ic">◍</span> Usuarios</button>
       <button data-vista="clave"><span class="ic">◑</span> Mi contraseña</button>
     </nav>
     <div class="lateral-pie">
@@ -289,6 +306,7 @@ table.datos input.celda:focus{outline:2px solid var(--cian);outline-offset:0;bor
           <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
         <span class="globo" id="campanaNum">0</span>
       </button>
+      <span class="etiqueta-consulta" title="Puedes ver y exportar, pero no modificar">Modo consulta</span>
       <div class="avisos-caja" id="avisosCaja"></div>
       <div class="yo"><b id="yoNombre">—</b><span id="yoRol">—</span></div>
     </header>
@@ -327,6 +345,7 @@ const bolsa = (() => {
 })();
 
 let sesion = {token:null, admin:null};
+let esVisor = false;            // cuenta de solo consulta
 let vistaActual = 'tablero';   // evita que un detector de otra vista se dispare
 let lookups = {};   // catálogos cargados para los selectores
 
@@ -429,7 +448,10 @@ async function abrirPanel(){
   $('#acceso').style.display='none';
   $('#panel').classList.add('vivo');
   $('#yoNombre').textContent = sesion.admin.nombre;
-  $('#yoRol').textContent = sesion.admin.rol;
+  esVisor = sesion.admin.rol === 'VISOR';
+  document.body.classList.toggle('visor', esVisor);
+  document.body.classList.toggle('es-admin', sesion.admin.rol === 'ADMIN');
+  $('#yoRol').textContent = esVisor ? 'Visor' : sesion.admin.rol;
   await cargarLookups();
   irA('tablero');
   revisarPendientes();
@@ -598,7 +620,7 @@ const TITULOS = {
   tablero:'Tablero', alumnos:'Alumnos', documentos:'Documentos',
   reportes:'Reportes', asignaciones:'Materias por grupo',
   horarios:'Horarios', grupos:'Grupos', materias:'Materias', docentes:'Docentes', modulos:'Módulos y submódulos',
-  carreras:'Carreras', periodos:'Periodos', avisos:'Avisos', notificaciones:'Notificaciones al alumno',
+  carreras:'Carreras', periodos:'Periodos', avisos:'Avisos', usuarios:'Usuarios del panel', notificaciones:'Notificaciones al alumno',
   importar:'Importar Excel', asistencia:'Asistencia', respaldo:'Respaldo de datos',
   cierre:'Cierre de ciclo', clave:'Mi contraseña'
 };
@@ -644,6 +666,7 @@ async function irA(vista){
     else if(vista==='docentes')       await verDocentes();
     else if(vista==='avisos')         await verCatalogo('avisos');
     else if(vista==='notificaciones') await verNotificaciones();
+    else if(vista==='usuarios')       await verUsuarios();
     else if(vista==='clave')          verClave();
     else                              await verCatalogo(vista);
   }catch(e){
@@ -2718,7 +2741,7 @@ function pintarModulos(relaciones){
   const pareceModulo = n => /[A-ZÁÉÍÓÚÑ]{4}/.test(n) && n === n.toUpperCase();
   const nombreDe = id => materias.find(m => m.id === id)?.nombre ?? '—';
 
-  const chip = (m, extra = '') => `<div class="mat-chip${modElegida === m.id ? ' elegida' : ''}" draggable="true"
+  const chip = (m, extra = '') => `<div class="mat-chip${modElegida === m.id ? ' elegida' : ''}" draggable="${esVisor ? 'false' : 'true'}"
       data-id="${m.id}" title="Arrastra o toca para mover">
       <span class="asa">⋮⋮</span><span class="txt">${escapar(m.nombre)}</span>${extra}</div>`;
 
@@ -2795,6 +2818,7 @@ function pintarModulos(relaciones){
   /* --- Mover una materia a un destino --- */
   const mover = async (id, destino) => {
     modElegida = null;
+    if(esVisor){ pintarModulos(relaciones); recado('#recadoMod', 'Tu cuenta es de solo consulta.'); return; }
     const rel = relDe.get(id);
     try{
       if(destino === 'nuevo'){
@@ -2991,6 +3015,107 @@ async function generarLlavesVapid(){
     catch(_){ b.previousElementSibling.select(); b.textContent = 'Usa Ctrl+C'; }
     setTimeout(() => b.textContent = 'Copiar', 1800);
   }));
+}
+
+/* ==========================================================================
+   USUARIOS DEL PANEL
+
+   Aquí el administrador crea cuentas de VISOR: personas que pueden ver toda
+   la información y exportarla, pero no modificar nada. El servidor es quien
+   hace cumplir esa regla; el panel solo esconde los botones.
+   Las cuentas de administrador se muestran pero no se tocan desde aquí.
+   ========================================================================== */
+const NOMBRE_ROL = {ADMIN:'Administrador', CONTROL_ESCOLAR:'Control Escolar',
+                    DIRECTIVO:'Directivo', VISOR:'Visor (solo consulta)'};
+
+async function verUsuarios(){
+  const r = await api('usuarios_listar');
+  if(!r.ok) throw new Error(r.error.includes('no reconocida')
+    ? 'Falta actualizar la función admin-api a la versión 25.' : r.error);
+  const lista = r.usuarios;
+
+  $('#vista').innerHTML = `
+    <div class="herramientas">
+      <button class="boton" id="btnNuevoVisor">Agregar visor</button>
+    </div>
+    <div class="tarjeta">
+      <h3>Cuentas del panel <span style="font-weight:400;color:var(--texto-suave)">(${lista.length})</span></h3>
+      <div class="tabla-marco"><table class="datos">
+        <thead><tr><th>Nombre</th><th>Usuario</th><th>Rol</th><th>Último acceso</th><th>Estado</th><th></th></tr></thead>
+        <tbody>${lista.map(u => `<tr data-id="${u.id}" style="${u.activo ? '' : 'opacity:.55'}">
+          <td><b>${escapar(u.nombre_completo ?? '—')}</b>${u.id === r.yo ? ' <span class="sello info">Tú</span>' : ''}</td>
+          <td><code>${escapar(u.usuario)}</code></td>
+          <td>${escapar(NOMBRE_ROL[u.rol] ?? u.rol)}</td>
+          <td style="font-size:12.5px;color:var(--texto-suave)">${
+            u.ultimo_acceso ? new Date(u.ultimo_acceso).toLocaleString('es-MX') : 'Nunca'}</td>
+          <td>${u.activo ? '<span class="sello va">Activa</span>' : '<span class="sello espera">Desactivada</span>'}</td>
+          <td class="acciones">${u.rol === 'VISOR' ? `
+            <button class="boton tenue chico claveVisor">Cambiar contraseña</button>
+            <button class="boton tenue chico estadoVisor">${u.activo ? 'Desactivar' : 'Activar'}</button>`
+            : ''}</td>
+        </tr>`).join('')}</tbody>
+      </table></div>
+    </div>
+    <p style="margin-top:14px;font-size:13px;color:var(--texto-suave);max-width:76ch">
+      Un <b>visor</b> entra al mismo panel con su usuario y contraseña. Puede ver toda la
+      información y exportarla a Excel, pero no puede agregar, editar, borrar, importar ni
+      revisar documentos. Si desactivas una cuenta o le cambias la contraseña, su sesión
+      se cierra de inmediato.
+    </p>`;
+
+  $('#btnNuevoVisor').addEventListener('click', () => formVisor(null));
+
+  $('#vista').addEventListener('click', async e => {
+    if(vistaActual !== 'usuarios') return;
+    const tr = e.target.closest('tr[data-id]'); if(!tr) return;
+    const u = lista.find(x => x.id === Number(tr.dataset.id));
+    if(e.target.classList.contains('claveVisor')) formVisor(u);
+    if(e.target.classList.contains('estadoVisor')){
+      if(u.activo && !confirm(`¿Desactivar la cuenta de ${u.nombre_completo}? Ya no podrá entrar al panel.`)) return;
+      e.target.disabled = true;
+      const res = await api('usuario_guardar', {id: u.id, activo: !u.activo});
+      if(!res.ok){ alert(res.error); e.target.disabled = false; return; }
+      irA('usuarios');
+    }
+  });
+}
+
+function formVisor(u){
+  const nuevo = !u;
+  abrirVentana(nuevo ? 'Agregar visor' : `Cambiar contraseña · ${u.nombre_completo}`, `
+    ${nuevo ? `
+      <div class="campo"><label for="vNombre">Nombre completo</label>
+        <input id="vNombre" placeholder="Ej. Mtra. Laura Ruiz Pech"></div>
+      <div class="campo"><label for="vUsuario">Usuario para entrar</label>
+        <input id="vUsuario" placeholder="Ej. laura.ruiz" autocomplete="off" autocapitalize="none">
+        <p class="pista">Sin espacios ni acentos. Se guarda en minúsculas.</p></div>` : ''}
+    <div class="campo"><label for="vClave">${nuevo ? 'Contraseña' : 'Contraseña nueva'}</label>
+      <input id="vClave" type="text" autocomplete="new-password">
+      <p class="pista">Al menos 10 caracteres. Entrégasela a la persona en privado;
+        después puede cambiarla desde «Mi contraseña».</p></div>
+    <div id="recadoVisor"></div>`,
+    [{texto:'Cancelar', clase:'tenue', accion: cerrarVentana},
+     {texto:'Guardar', accion: async ev => {
+       const datos = nuevo
+         ? {usuario: $('#vUsuario').value.trim(), nombre: $('#vNombre').value.trim(), password: $('#vClave').value}
+         : {id: u.id, password: $('#vClave').value};
+       if(nuevo && !datos.nombre){ recado('#recadoVisor', 'Escribe el nombre.'); return; }
+       if(nuevo && !datos.usuario){ recado('#recadoVisor', 'Escribe el usuario.'); return; }
+       if(datos.password.length < 10){ recado('#recadoVisor', 'La contraseña necesita al menos 10 caracteres.'); return; }
+       ev.target.disabled = true;
+       const res = await api('usuario_guardar', datos);
+       ev.target.disabled = false;
+       if(!res.ok){ recado('#recadoVisor', res.error); return; }
+       cerrarVentana(); irA('usuarios');
+     }}]);
+  // Contraseña sugerida, fácil de dictar
+  const sug = () => {
+    const p = ['Maiz','Ceiba','Jaguar','Milpa','Henequen','Cenote','Venado','Pitaya'];
+    const a = new Uint32Array(3); crypto.getRandomValues(a);
+    return p[a[0] % p.length] + p[a[1] % p.length] + String(1000 + a[2] % 9000);
+  };
+  $('#vClave').value = sug();
+  setTimeout(() => (nuevo ? $('#vNombre') : $('#vClave')).focus(), 50);
 }
 
 /* ==========================================================================
@@ -3271,7 +3396,7 @@ async function revisarDocumento(regId, alCerrar){
       ? `<div class="recado ojo">El alumno subió un PDF. Ábrelo para revisarlo.</div>
          <button class="boton tenue" id="abrirPDF" style="margin-top:12px">Abrir el PDF</button>`
       : `<img src="${fuente}" style="width:100%;border-radius:8px;border:1px solid var(--linea)">`}
-    <div class="campo" style="margin-top:16px">
+    <div class="campo" style="margin-top:16px;${esVisor ? 'display:none' : ''}">
       <label for="revObs">Observaciones para el alumno</label>
       <textarea id="revObs" placeholder="Ej. La foto salió borrosa, vuelve a tomarla con más luz.">${escapar(doc.observaciones ?? '')}</textarea>
       <p class="pista">Solo se envían si devuelves el documento.</p>
@@ -3296,6 +3421,14 @@ async function revisarDocumento(regId, alCerrar){
   };
 
   $('#ventanaPie').innerHTML = '';
+  if(esVisor){
+    $('#ventanaTitulo').textContent = 'Ver documento';
+    const el = document.createElement('button');
+    el.className = 'boton'; el.textContent = 'Cerrar';
+    el.addEventListener('click', () => { if(alCerrar) alCerrar(); else cerrarVentana(); });
+    $('#ventanaPie').appendChild(el);
+    return;
+  }
   [
     {texto:'Cancelar', clase:'tenue', accion: () => { if(alCerrar) alCerrar(); else cerrarVentana(); }},
     {texto:'Devolver al alumno', clase:'peligro', accion: ev => {
