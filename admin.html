@@ -4084,7 +4084,7 @@ const ESTADOS_ASIST = {
   'JUSTIFICADA (OTRA)':      {tipo:'JUSTIFICADA', motivo:'OTRA'}
 };
 
-let asistLeida = null, asistFecha = '', asistArchivo = '';
+let asistLeida = null, asistDias = [], asistModo = 'ausencias', asistArchivo = '';
 
 async function verAsistencia(){
   asistLeida = null;
@@ -4109,14 +4109,15 @@ async function verAsistencia(){
 
   $('#vista').innerHTML = `
     <div class="tarjeta">
-      <h3>Subir la asistencia de un día</h3>
+      <h3>Subir asistencia</h3>
       <div class="cuerpo">
         <p style="font-size:13.5px;color:var(--texto-suave);max-width:68ch">
-          Sube el archivo con las inasistencias del día. Debe traer las columnas
+          Sube el archivo de asistencia. Debe traer las columnas
           <b>ID</b>, <b>Nombre</b>, <b>Semestre</b>, <b>Grupo</b>, <b>Fecha</b>,
           <b>Hora</b>, <b>Estado</b> y <b>Registro</b>. Las obligatorias son ID,
-          Fecha y Estado. Solo se registra a quien faltó; quien no aparece se toma
-          como presente.
+          Fecha y Estado. Puede traer uno o varios días. Sirven dos tipos de archivo:
+          el de <b>ausencias</b> (quien no aparece cuenta como presente) o el de
+          <b>escaneos de llegada</b> (las faltas se calculan con quien no escaneó).
         </p>
         <div class="campo" style="margin-top:18px">
           <label for="archAsist">Archivo</label>
@@ -4325,7 +4326,7 @@ function leerAsistencia(e){
       } else {
         matriz = matrizDesdeCSV(decodificarHibrido(buffer));
       }
-      armarAsistencia(matriz);
+      armarAsistencia(matriz).catch(err => recado('#recadoAsist','No se pudo leer el archivo: ' + err.message));
     } catch(err){
       recado('#recadoAsist','No se pudo leer el archivo: ' + err.message);
     }
@@ -4353,7 +4354,36 @@ function matrizDesdeCSV(texto){
   });
 }
 
-function armarAsistencia(matriz){
+/* Estados que significan que el alumno SÍ llegó. Si el archivo los trae, es
+   una lista de escaneos (quién llegó) y las faltas se calculan al revés:
+   falta todo alumno activo que no escaneó ese día. */
+const ESTADOS_PRESENTE = new Set(['ASISTENCIA', 'PRESENTE', 'ASISTIO', 'ENTRADA']);
+
+// Fecha en cualquier formato común → AAAA-MM-DD
+function fechaISO(v){
+  if(v === null || v === undefined || v === '') return '';
+  if(typeof v === 'number' && v > 20000 && v < 80000){          // número de serie de Excel
+    const d = new Date(Math.round((v - 25569) * 86400000));
+    return d.toISOString().slice(0, 10);
+  }
+  const t = limpia(v);
+  let m = t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if(m) return `${m[1]}-${m[2].padStart(2,'0')}-${m[3].padStart(2,'0')}`;
+  m = t.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})/);      // 13/10/2026
+  if(m) return `${m[3]}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`;
+  return '';
+}
+
+function horaCorta(v){
+  let hora = limpia(v);
+  if(hora && /^0?\.\d+$/.test(hora)){
+    const m = Math.round(parseFloat(hora) * 24 * 60);
+    hora = String(Math.floor(m/60)).padStart(2,'0') + ':' + String(m%60).padStart(2,'0');
+  }
+  return /^\d{1,2}:\d{2}/.test(hora) ? hora.padStart(5,'0').slice(0,5) : null;
+}
+
+async function armarAsistencia(matriz){
   if(!matriz || matriz.length < 2) throw new Error('El archivo viene vacío.');
 
   const enc = matriz[0].map(c => normTxt(c));
@@ -4370,105 +4400,192 @@ function armarAsistencia(matriz){
     return;
   }
 
-  const filas = [], desconocidos = [], fechas = new Set();
+  // 1. Se leen los renglones y se agrupan por día
+  const dias = new Map(), desconocidos = [], sinFecha = [];
+  let hayPresentes = false;
+  const dia = f => {
+    if(!dias.has(f)) dias.set(f, {fecha: f, presentes: new Set(), marcados: new Map()});
+    return dias.get(f);
+  };
 
   for(let i = 1; i < matriz.length; i++){
     const c = matriz[i];
     if(!c) continue;
-    const id = limpia(c[iID]);
+    const id = limpia(c[iID]).toUpperCase();
     if(!id) continue;
+    const f = fechaISO(c[iFec]);
+    if(!f){ sinFecha.push(id); continue; }
 
-    const estadoTxt = normTxt(c[iEst]);
-    if(!estadoTxt || estadoTxt === 'PRESENTE' || estadoTxt === 'ASISTIO') continue;
+    const est = normTxt(c[iEst]);
+    const d = dia(f);
+    if(!est || ESTADOS_PRESENTE.has(est)){ hayPresentes = true; d.presentes.add(id); continue; }
 
-    const mapeo = ESTADOS_ASIST[estadoTxt];
+    const mapeo = ESTADOS_ASIST[est];
     if(!mapeo){ desconocidos.push(limpia(c[iEst])); continue; }
-
-    const f = limpia(c[iFec]).slice(0,10);
-    if(f) fechas.add(f);
-
-    // La hora puede venir como texto (08:15) o como fracción de día de Excel
-    let hora = iHora >= 0 ? limpia(c[iHora]) : '';
-    if(hora && /^0?\.\d+$/.test(hora)){
-      const m = Math.round(parseFloat(hora) * 24 * 60);
-      hora = String(Math.floor(m/60)).padStart(2,'0') + ':' + String(m%60).padStart(2,'0');
-    }
-    if(hora && !/^\d{1,2}:\d{2}/.test(hora)) hora = '';
-
-    filas.push({
-      id,
-      nombre: iNom >= 0 ? limpia(c[iNom]) : '',
-      hora: hora ? hora.slice(0,5) : null,
+    if(mapeo.tipo === 'RETARDO') d.presentes.add(id);   // llegó, aunque tarde
+    d.marcados.set(id, {
+      id, nombre: iNom >= 0 ? limpia(c[iNom]) : '',
+      hora: iHora >= 0 ? horaCorta(c[iHora]) : null,
       registro: iReg >= 0 ? (limpia(c[iReg]) || null) : null,
       ...mapeo
     });
   }
 
-  if(!filas.length){ recado('#recadoAsist','No se encontró ninguna inasistencia en el archivo.'); return; }
-  if(fechas.size > 1){
-    recado('#recadoAsist','El archivo tiene varias fechas: ' + [...fechas].join(', ')
-      + '. Sube un archivo por día.');
-    return;
+  if(!dias.size){ recado('#recadoAsist','No se encontró ningún registro con fecha en el archivo.'); return; }
+  recado('#recadoAsist','Calculando faltas por día…','ojo');
+
+  // 2. Alumnos activos (para saber quién no escaneó) y lo ya registrado esos días
+  const ra = await api('listar', {tabla:'alumnos',
+    columnas:'id,matricula,apellido_paterno,apellido_materno,nombres,grupo_id,activo,estatus', limite:3000});
+  if(!ra.ok){ recado('#recadoAsist', ra.error); return; }
+  const activos = ra.datos.filter(a => a.activo !== false && !['EGRESADO','BAJA'].includes(a.estatus));
+  const porMatricula = new Map(ra.datos.map(a => [String(a.matricula).trim().toUpperCase(), a]));
+  const porId = new Map(ra.datos.map(a => [a.id, a]));
+  const nombreDe = a => `${a.apellido_paterno ?? ''} ${a.apellido_materno ?? ''} ${a.nombres ?? ''}`.replace(/\s+/g,' ').trim();
+
+  const hoy = new Date().toLocaleDateString('en-CA', {timeZone:'America/Cancun'});
+  const horaLocal = Number(new Date().toLocaleString('en-US', {timeZone:'America/Cancun', hour:'numeric', hour12:false}));
+  const noEncontrados = new Set();
+
+  for(const d of [...dias.values()]){
+    // Justificaciones que ya existían ese día: se conservan
+    const ex = await api('listar', {tabla:'inasistencias', filtros:{fecha: d.fecha}, limite:2000});
+    const justificadas = new Map((ex.ok ? ex.datos : [])
+      .filter(x => x.tipo === 'JUSTIFICADA')
+      .map(x => [String(porId.get(x.alumno_id)?.matricula ?? '').toUpperCase(), x]));
+
+    const filas = [];
+    for(const r of d.marcados.values()){
+      if(!porMatricula.has(r.id)) noEncontrados.add(r.id);
+      filas.push(r);
+    }
+    let conservadas = 0;
+    if(hayPresentes){
+      for(const a of activos){
+        const mat = String(a.matricula).trim().toUpperCase();
+        if(d.presentes.has(mat) || d.marcados.has(mat)) continue;
+        const j = justificadas.get(mat);
+        if(j) conservadas++;
+        filas.push(j
+          ? {id: mat, nombre: nombreDe(a), hora: null, registro: j.registro ?? null, tipo: 'JUSTIFICADA', motivo: j.motivo ?? 'OTRA'}
+          : {id: mat, nombre: nombreDe(a), hora: null, registro: 'Sin escaneo', tipo: 'FALTA', motivo: null});
+      }
+      d.presentes.forEach(id => { if(!porMatricula.has(id)) noEncontrados.add(id); });
+    }
+
+    d.filas = filas;
+    d.escaneados = d.presentes.size;
+    d.faltas = filas.filter(x => x.tipo === 'FALTA').length;
+    d.retardos = filas.filter(x => x.tipo === 'RETARDO').length;
+    d.justificadas = filas.filter(x => x.tipo === 'JUSTIFICADA').length;
+    d.conservadas = conservadas;
+    d.yaCargado = (ex.ok ? ex.datos.length : 0) > 0;
+    d.grupoDe = mat => { const a = porMatricula.get(mat); const g = a?.grupo_id ? buscaEn('grupos', a.grupo_id) : null; return g ? nombreGrupo(g) : '—'; };
+
+    // Avisos: día que no ha terminado o con muy pocos escaneos
+    d.avisos = [];
+    if(hayPresentes && d.fecha === hoy && horaLocal < 15) d.avisos.push('el día todavía no termina: quien llegue más tarde quedaría como falta');
+    if(hayPresentes && activos.length && d.escaneados < activos.length * 0.6) d.avisos.push(`solo escanearon ${d.escaneados} de ${activos.length} alumnos`);
+    d.guardar = !d.avisos.length && d.filas.length > 0;
   }
 
-  asistLeida = filas;
-  asistFecha = [...fechas][0] || '';
+  asistDias = [...dias.values()].sort((a,b) => a.fecha < b.fecha ? -1 : 1);
+  asistModo = hayPresentes ? 'presencia' : 'ausencias';
   recado('#recadoAsist','');
-  previaAsistencia(filas, [...new Set(desconocidos)]);
+  previaAsistencia([...new Set(desconocidos)], [...noEncontrados], sinFecha.length);
 }
 
-function previaAsistencia(filas, desconocidos){
-  const cuenta = {};
-  filas.forEach(f => {
-    const k = f.tipo === 'JUSTIFICADA' ? `Justificada (${f.motivo.toLowerCase()})`
-            : f.tipo === 'RETARDO' ? 'Retardo' : 'Falta';
-    cuenta[k] = (cuenta[k] || 0) + 1;
-  });
+function previaAsistencia(desconocidos, noEncontrados, sinFecha){
+  const dias = asistDias;
+  const dSemana = f => new Date(f + 'T12:00:00').toLocaleDateString('es-MX', {weekday:'short'});
 
   $('#previaAsist').innerHTML = `
-    <div class="medidores" style="margin-top:20px">
-      <div class="medidor"><div class="r">Fecha</div>
-        <div class="v" style="font-size:19px">${fecha(asistFecha)}</div></div>
-      <div class="medidor alerta"><div class="r">Inasistencias</div>
-        <div class="v">${filas.length}</div></div>
-      ${Object.entries(cuenta).map(([k,n]) =>
-        `<div class="medidor"><div class="r">${escapar(k)}</div><div class="v">${n}</div></div>`).join('')}
-    </div>
+    <div class="tarjeta" style="margin-top:20px">
+      <h3>Revisa antes de guardar
+        <span style="font-weight:400;color:var(--texto-suave)">· ${dias.length} día${dias.length === 1 ? '' : 's'}</span></h3>
+      <div class="cuerpo">
+        <p style="font-size:13.5px;color:var(--texto-suave);max-width:76ch;margin-bottom:12px">${
+          asistModo === 'presencia'
+          ? 'Este archivo trae a los alumnos que <b>escanearon su llegada</b>. Las faltas se calculan al revés: falta todo alumno activo que no escaneó ese día. Los retardos se guardan como vienen.'
+          : 'Este archivo trae a los alumnos que <b>faltaron</b>. Quien no aparece cuenta como presente.'}
+          Si un día ya estaba cargado, se reemplaza; las faltas que ya estaban <b>justificadas</b> se conservan.</p>
 
-    ${desconocidos.length ? `<div class="recado ojo" style="margin-top:16px">
-      No se reconocieron estos estados y se omitirán:
-      <b>${escapar(desconocidos.join(' · '))}</b></div>` : ''}
+        <div class="tabla-marco"><table class="datos" style="min-width:0">
+          <thead><tr><th style="width:44px">Guardar</th><th>Día</th>
+            ${asistModo === 'presencia' ? '<th class="n">Escanearon</th>' : ''}
+            <th class="n">Faltas</th><th class="n">Retardos</th><th class="n">Justificadas</th><th></th></tr></thead>
+          <tbody>${dias.map((d, i) => `<tr data-i="${i}">
+            <td><input type="checkbox" class="chkDia" ${d.guardar ? 'checked' : ''} ${d.filas.length ? '' : 'disabled'}></td>
+            <td><b>${dSemana(d.fecha)} ${fecha(d.fecha)}</b>
+              ${d.yaCargado ? '<span class="sello info" style="margin-left:6px">ya cargado</span>' : ''}
+              ${d.avisos.map(a => `<div style="font-size:12px;color:#7A5312;margin-top:3px">⚠ ${escapar(a)}</div>`).join('')}
+              ${!d.filas.length ? '<div style="font-size:12px;color:var(--texto-suave);margin-top:3px">Sin faltas ni retardos: no hay nada que guardar.</div>' : ''}</td>
+            ${asistModo === 'presencia' ? `<td class="n">${d.escaneados}</td>` : ''}
+            <td class="n">${d.faltas ? `<span class="sello cae">${d.faltas}</span>` : 0}</td>
+            <td class="n">${d.retardos ? `<span class="sello ojo">${d.retardos}</span>` : 0}</td>
+            <td class="n">${d.justificadas ? `<span class="sello info">${d.justificadas}</span>` : 0}</td>
+            <td class="acciones">${d.filas.length ? '<button class="boton tenue chico verDia">Ver quiénes</button>' : ''}</td>
+          </tr>`).join('')}</tbody>
+        </table></div>
 
-    <div class="recado ojo" style="margin-top:16px">
-      Si ya habías cargado el ${fecha(asistFecha)}, se reemplaza por completo.
-      Así una falta que después se justificó queda corregida.
-    </div>
+        ${noEncontrados.length ? `<div class="recado ojo" style="margin-top:14px">
+          ${noEncontrados.length} número${noEncontrados.length === 1 ? '' : 's'} de control del archivo no
+          corresponde${noEncontrados.length === 1 ? '' : 'n'} a ningún alumno del portal y se omitirá${noEncontrados.length === 1 ? '' : 'n'}:
+          <b>${escapar(noEncontrados.slice(0, 15).join(' · '))}${noEncontrados.length > 15 ? '…' : ''}</b></div>` : ''}
+        ${desconocidos.length ? `<div class="recado ojo" style="margin-top:10px">
+          No se reconocieron estos estados y se omitirán: <b>${escapar(desconocidos.join(' · '))}</b></div>` : ''}
+        ${sinFecha ? `<div class="recado ojo" style="margin-top:10px">${sinFecha} renglones sin fecha válida se omitirán.</div>` : ''}
 
-    <div style="margin-top:20px;display:flex;gap:10px;flex-wrap:wrap">
-      <button class="boton" id="btnGuardarAsist">Guardar ${filas.length} inasistencias</button>
-      <button class="boton tenue" id="btnCancelarAsist">Cancelar</button>
-    </div>
-    <div id="resultadoAsist"></div>`;
+        <div style="margin-top:18px;display:flex;gap:10px;flex-wrap:wrap">
+          <button class="boton" id="btnGuardarAsist">Guardar los días marcados</button>
+          <button class="boton tenue" id="btnCancelarAsist">Cancelar</button>
+        </div>
+        <div id="resultadoAsist"></div>
+      </div>
+    </div>`;
+
+  const tabla = $('#previaAsist');
+  tabla.addEventListener('change', ev => {
+    if(!ev.target.classList.contains('chkDia')) return;
+    dias[Number(ev.target.closest('tr').dataset.i)].guardar = ev.target.checked;
+  });
+  tabla.addEventListener('click', ev => {
+    if(!ev.target.classList.contains('verDia')) return;
+    const d = dias[Number(ev.target.closest('tr').dataset.i)];
+    const orden = {FALTA:0, JUSTIFICADA:1, RETARDO:2};
+    const lista = [...d.filas].sort((a,b) => (orden[a.tipo] - orden[b.tipo])
+      || cmp(d.grupoDe(a.id), d.grupoDe(b.id)) || cmp(a.nombre, b.nombre));
+    abrirVentana(`${dSemana(d.fecha)} ${fecha(d.fecha)}`, `
+      <div class="tabla-marco"><table class="datos" style="min-width:0">
+        <thead><tr><th>Alumno</th><th>Grupo</th><th>Estado</th><th>Hora</th></tr></thead>
+        <tbody>${lista.map(x => `<tr>
+          <td><b>${escapar(x.nombre || x.id)}</b><div style="font-size:12px;color:var(--texto-suave)">${escapar(x.id)}</div></td>
+          <td>${escapar(d.grupoDe(x.id))}</td>
+          <td><span class="sello ${x.tipo === 'FALTA' ? 'cae' : x.tipo === 'RETARDO' ? 'ojo' : 'info'}">${
+            x.tipo === 'FALTA' ? 'Falta' : x.tipo === 'RETARDO' ? 'Retardo' : 'Justificada'}</span></td>
+          <td style="color:var(--texto-suave)">${escapar(x.hora || '—')}</td></tr>`).join('')}</tbody>
+      </table></div>`,
+      [{texto:'Cerrar', accion: cerrarVentana}]);
+  });
 
   $('#btnCancelarAsist').addEventListener('click', () => irA('asistencia'));
   $('#btnGuardarAsist').addEventListener('click', async ev => {
-    ev.target.disabled = true; ev.target.textContent = 'Guardando…';
-    const r = await api('importar_asistencia', {
-      fecha: asistFecha, archivo: asistArchivo, filas: asistLeida, reemplazar: true});
-    ev.target.disabled = false; ev.target.textContent = `Guardar ${asistLeida.length} inasistencias`;
-
-    if(!r.ok){ recado('#resultadoAsist', r.error); return; }
-
+    const elegidos = dias.filter(d => d.guardar && d.filas.length);
+    if(!elegidos.length){ recado('#resultadoAsist', 'Marca al menos un día.'); return; }
+    ev.target.disabled = true;
+    const hechos = [], errores = [];
+    for(const d of elegidos){
+      ev.target.textContent = `Guardando ${fecha(d.fecha)}…`;
+      const r = await api('importar_asistencia', {
+        fecha: d.fecha, archivo: asistArchivo, filas: d.filas, reemplazar: true});
+      if(r.ok) hechos.push(`${fecha(d.fecha)}: ${r.guardadas}`);
+      else errores.push(`${fecha(d.fecha)}: ${r.error}`);
+    }
+    ev.target.disabled = false; ev.target.textContent = 'Guardar los días marcados';
     $('#resultadoAsist').innerHTML = `
-      <div class="recado bien" style="margin-top:16px">
-        Se guardaron ${r.guardadas} inasistencias del ${fecha(r.fecha)}.
-      </div>
-      ${r.total_no_encontrados ? `
-        <div class="recado ojo" style="margin-top:10px">
-          ${r.total_no_encontrados} no se pudieron enlazar con ningún alumno:
-          <br>${escapar(r.no_encontrados.join(' · '))}
-        </div>` : ''}`;
-    setTimeout(() => irA('asistencia'), 2200);
+      ${hechos.length ? `<div class="recado bien" style="margin-top:16px">Guardado · ${escapar(hechos.join(' · '))} registros.</div>` : ''}
+      ${errores.length ? `<div class="recado mal" style="margin-top:10px">${escapar(errores.join(' · '))}</div>` : ''}`;
+    if(!errores.length) setTimeout(() => irA('asistencia'), 2500);
   });
 }
 
