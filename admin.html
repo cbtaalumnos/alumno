@@ -1898,7 +1898,7 @@ const CAMPOS_ALUMNO = [
   {c:'activo', r:'Activo', tipo:'bool'}
 ];
 
-let filtroAlumnos = {grupo_id:'', busqueda:''};
+let filtroAlumnos = {grupo_id:'', busqueda:'', acceso:''};
 
 async function verAlumnos(){
   const filtros = {};
@@ -1913,7 +1913,26 @@ async function verAlumnos(){
     orden:'apellido_paterno', limite:1000
   });
   if(!r.ok) throw new Error(r.error);
-  const filas = ordenar('alumnos', r.datos);
+  const todos = ordenar('alumnos', r.datos);
+
+  /* ¿Quién ya creó su contraseña del portal? Se cuentan solo los activos.
+     El filtro de acceso se aplica aquí, sobre la lista ya traída. */
+  const activos = todos.filter(a => a.activo !== false);
+  const conClave = activos.filter(a => a.password_hash).length;
+  const pctClave = activos.length ? Math.round(100 * conClave / activos.length) : 0;
+  const porGrupo = new Map();
+  activos.forEach(a => {
+    const k = a.grupo_id ?? 0;
+    if(!porGrupo.has(k)) porGrupo.set(k, {grupo_id:k, total:0, con:0});
+    const g = porGrupo.get(k); g.total++; if(a.password_hash) g.con++;
+  });
+  const gruposAcceso = [...porGrupo.values()].sort((x,y) => {
+    const gx = buscaEn('grupos', x.grupo_id), gy = buscaEn('grupos', y.grupo_id);
+    return gx && gy ? ORDENES.grupos(gx, gy) : (gx ? -1 : 1);
+  });
+  const filas = todos.filter(a => filtroAlumnos.acceso === 'con' ? a.password_hash
+                                 : filtroAlumnos.acceso === 'sin' ? !a.password_hash : true);
+  const colorPct = p => p >= 80 ? 'var(--verde)' : p >= 50 ? 'var(--ambar)' : 'var(--rojo)';
 
   $('#vista').innerHTML = `
     <div class="herramientas">
@@ -1921,6 +1940,14 @@ async function verAlumnos(){
         <label for="fGrupo">Grupo</label>
         <select id="fGrupo"><option value="">Todos los grupos</option>
           ${(lookups.grupos||[]).map(g => `<option value="${g.id}"${String(filtroAlumnos.grupo_id)===String(g.id)?' selected':''}>${escapar(nombreGrupo(g))}</option>`).join('')}
+        </select>
+      </div>
+      <div class="campo">
+        <label for="fAcceso">Acceso al portal</label>
+        <select id="fAcceso">
+          <option value="">Todos</option>
+          <option value="con"${filtroAlumnos.acceso==='con'?' selected':''}>Ya crearon contraseña</option>
+          <option value="sin"${filtroAlumnos.acceso==='sin'?' selected':''}>Todavía usan su CURP</option>
         </select>
       </div>
       <div class="campo crece">
@@ -1932,8 +1959,44 @@ async function verAlumnos(){
       <button class="boton" id="btnNuevoAlumno">Agregar alumno</button>
     </div>
 
+    ${activos.length ? `
+    <div class="tarjeta" style="margin-bottom:18px">
+      <h3>Contraseñas creadas
+        <span style="font-weight:400;color:var(--texto-suave)">· ${
+          filtroAlumnos.grupo_id ? escapar(etiquetaRef('grupos', Number(filtroAlumnos.grupo_id))) : 'todo el plantel'}${
+          filtroAlumnos.busqueda ? ' · búsqueda «' + escapar(filtroAlumnos.busqueda) + '»' : ''}</span></h3>
+      <div class="cuerpo">
+        <div style="display:flex;flex-wrap:wrap;gap:22px;align-items:center">
+          <div style="min-width:190px">
+            <div style="font-size:34px;font-weight:800;line-height:1;color:${colorPct(pctClave)}">${pctClave}%</div>
+            <div style="font-size:13px;color:var(--texto-suave);margin-top:6px">
+              <b style="color:var(--texto)">${conClave}</b> de ${activos.length} alumnos ya tienen contraseña<br>
+              <b style="color:var(--texto)">${activos.length - conClave}</b> todavía entran con su CURP</div>
+            <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
+              <button class="boton tenue chico filtroAcceso" data-a="con">Ver quiénes sí</button>
+              <button class="boton tenue chico filtroAcceso" data-a="sin">Ver quiénes no</button>
+            </div>
+          </div>
+          ${!filtroAlumnos.grupo_id && gruposAcceso.length > 1 ? `
+          <div style="flex:1;min-width:300px;display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:6px 22px">
+            ${gruposAcceso.map(g => {
+              const p = g.total ? Math.round(100 * g.con / g.total) : 0;
+              return `<button class="grupoAcceso" data-g="${g.grupo_id}" title="Ver este grupo"
+                style="all:unset;cursor:pointer;display:grid;grid-template-columns:86px 1fr 62px;gap:10px;align-items:center;padding:4px 0">
+                <span style="font-size:13px;font-weight:600">${escapar(g.grupo_id ? etiquetaRef('grupos', g.grupo_id) : 'Sin grupo')}</span>
+                <span style="background:#EDF2EB;border-radius:4px;height:8px;overflow:hidden">
+                  <span style="display:block;width:${p}%;height:100%;background:${colorPct(p)}"></span></span>
+                <span style="font-size:12.5px;text-align:right;color:var(--texto-suave);font-variant-numeric:tabular-nums">${g.con}/${g.total}</span>
+              </button>`;
+            }).join('')}
+          </div>` : ''}
+        </div>
+      </div>
+    </div>` : ''}
+
     <div class="tarjeta">
-      <h3>Alumnos <span style="font-weight:400;color:var(--texto-suave)">(${filas.length})</span>
+      <h3>${filtroAlumnos.acceso === 'con' ? 'Alumnos que ya crearon contraseña'
+          : filtroAlumnos.acceso === 'sin' ? 'Alumnos que todavía usan su CURP' : 'Alumnos'} <span style="font-weight:400;color:var(--texto-suave)">(${filas.length})</span>
         <span class="der"><button class="boton tenue chico" id="btnExpAl">Exportar a Excel</button></span></h3>
       ${filas.length ? `
         <div class="tabla-marco">
@@ -1960,8 +2023,16 @@ async function verAlumnos(){
   $('#btnBuscar').addEventListener('click', () => {
     filtroAlumnos.grupo_id = $('#fGrupo').value;
     filtroAlumnos.busqueda = $('#fBusca').value.trim();
+    filtroAlumnos.acceso = $('#fAcceso').value;
     irA('alumnos');
   });
+  $('#fAcceso').addEventListener('change', () => $('#btnBuscar').click());
+  $$('#vista .filtroAcceso').forEach(b => b.addEventListener('click', () => {
+    $('#fAcceso').value = b.dataset.a; $('#btnBuscar').click();
+  }));
+  $$('#vista .grupoAcceso').forEach(b => b.addEventListener('click', () => {
+    $('#fGrupo').value = b.dataset.g === '0' ? '' : b.dataset.g; $('#btnBuscar').click();
+  }));
   $('#fBusca').addEventListener('keydown', e => { if(e.key==='Enter') $('#btnBuscar').click(); });
   $('#fGrupo').addEventListener('change', () => $('#btnBuscar').click());
   $('#btnNuevoAlumno').addEventListener('click', () => formAlumno(null));
@@ -1969,7 +2040,8 @@ async function verAlumnos(){
   $('#btnExpAl').addEventListener('click', () => exportarCSV('alumnos', filas.map(a => ({
     matricula:a.matricula, curp:a.curp, apellido_paterno:a.apellido_paterno,
     apellido_materno:a.apellido_materno, nombres:a.nombres,
-    grupo: etiquetaRef('grupos', a.grupo_id), estatus:a.estatus, celular:a.celular
+    grupo: etiquetaRef('grupos', a.grupo_id), estatus:a.estatus, celular:a.celular,
+    contrasena: a.password_hash ? 'SI' : 'NO, usa su CURP'
   }))));
 
   $('#vista').addEventListener('click', async e => {
