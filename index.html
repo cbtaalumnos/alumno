@@ -79,7 +79,7 @@ a{color:var(--verde);text-underline-offset:2px}
   display:flex;flex-direction:column;justify-content:center;align-items:center;
   padding:48px 40px;text-align:center;color:#fff;
   background:
-    radial-gradient(120% 90% at 50% 0%, #1c5c33 0%, transparent 60%),
+    radial-gradient(120% 90% at 50% 0%, var(--verde-medio,#1c5c33) 0%, transparent 60%),
     var(--verde-hondo);
 }
 .acceso-marca img{width:190px;height:auto;filter:drop-shadow(0 12px 30px rgba(0,0,0,.35))}
@@ -215,7 +215,7 @@ a{color:var(--verde);text-underline-offset:2px}
 .tarjeta > .cuerpo{padding:18px}
 
 .ficha{
-  background:linear-gradient(100deg,var(--verde-hondo),#1c5c33);
+  background:linear-gradient(100deg,var(--verde-hondo),var(--verde-medio,#1c5c33));
   color:#fff;border-radius:var(--radio);padding:20px 22px;
   display:flex;gap:20px;align-items:center;flex-wrap:wrap;
 }
@@ -2013,6 +2013,181 @@ function verClave(){
     bolsa.tira('cbta291_alumno');
   }
 })();
+
+/* ==========================================================================
+   TEMAS CONMEMORATIVOS
+
+   Cambian los colores, ponen una cinta de banderines en el encabezado, un
+   saludo y, en el portal del alumno, una animación breve. Las tablas, los
+   formularios y los datos no cambian.
+
+   Cómo se elige el tema:
+   1. Al abrir la página se aplica el calendario de abajo (sin esperar a
+      la red), o el último tema que se descargó.
+   2. Después se consulta lo que se configuró en el panel (Apariencia):
+      automático por calendario, un tema fijo, o ninguno.
+   ========================================================================== */
+const TEMAS = {
+  halloween: {nombre:'Halloween', emoji:'🎃', saludo:'¡Feliz Halloween!', desde:'10-24', hasta:'11-02',
+    verde:'#C2410C', medio:'#5B2A6E', hondo:'#2B1036', tinta:'#1C0A24',
+    cinta:['#F97316','#6D28D9','#1F1F1F'], particulas:['🦇','🎃','🦇','🕸️']},
+  revolucion: {nombre:'Revolución Mexicana', emoji:'⭐', saludo:'Aniversario de la Revolución Mexicana', desde:'11-17', hasta:'11-21',
+    verde:'#9A3412', medio:'#5C3D1E', hondo:'#33210F', tinta:'#221509',
+    cinta:['#006847','#FFFFFF','#CE1126'], particulas:[]},
+  navidad: {nombre:'Navidad y fin de año', emoji:'🎄', saludo:'¡Felices fiestas!', desde:'12-01', hasta:'01-06',
+    verde:'#B91C1C', medio:'#1E5A3C', hondo:'#0F3D2A', tinta:'#082419',
+    cinta:['#DC2626','#FACC15','#16A34A'], particulas:['❄','❅','❆','❄']},
+  amor: {nombre:'Amor y Amistad', emoji:'💖', saludo:'¡Feliz Día del Amor y la Amistad!', desde:'02-10', hasta:'02-15',
+    verde:'#BE185D', medio:'#86174A', hondo:'#4C0A27', tinta:'#33061A',
+    cinta:['#F472B6','#E11D48','#FBCFE8'], particulas:['❤','💕','❤','💗']},
+  bandera: {nombre:'Día de la Bandera', emoji:'🇲🇽', saludo:'24 de febrero · Día de la Bandera', desde:'02-22', hasta:'02-25',
+    verde:'#006847', medio:'#0B5A3E', hondo:'#003D2A', tinta:'#00291C',
+    cinta:['#006847','#FFFFFF','#CE1126'], particulas:[]},
+  maestro: {nombre:'Día del Maestro', emoji:'🍎', saludo:'¡Feliz Día del Maestro!', desde:'05-13', hasta:'05-16',
+    verde:'#1D4ED8', medio:'#1E3A8A', hondo:'#172554', tinta:'#0E1736',
+    cinta:['#3B82F6','#FACC15','#EF4444'], particulas:['🍎','📚','✏️']},
+  estudiante: {nombre:'Día del Estudiante', emoji:'🎓', saludo:'¡Feliz Día del Estudiante!', desde:'05-21', hasta:'05-24',
+    verde:'#7C3AED', medio:'#4C1D95', hondo:'#2E1065', tinta:'#1E0A45',
+    cinta:['#A78BFA','#FACC15','#22D3EE'], particulas:['🎓','✏️','⭐']},
+  patrias: {nombre:'Fiestas Patrias', emoji:'🇲🇽', saludo:'¡Viva México!', desde:'09-01', hasta:'09-17',
+    verde:'#006847', medio:'#0B5A3E', hondo:'#003D2A', tinta:'#00291C',
+    cinta:['#006847','#FFFFFF','#CE1126'], particulas:['🎉','⭐','🎊']}
+};
+
+const TEMA_CONFIG_BASE = {modo:'auto', fijo:'', fechas:{}, animacion:true};
+let temaConfig = TEMA_CONFIG_BASE;
+let temaVistaPrevia = null;   // solo en el panel, mientras se prueba un tema
+
+function mmddHoy(){
+  const [, m, d] = new Date().toLocaleDateString('en-CA', {timeZone:'America/Cancun'}).split('-');
+  return `${m}-${d}`;
+}
+// ¿La fecha MM-DD cae dentro del rango? (el rango puede cruzar de año: 12-01 → 01-06)
+function enRango(hoy, desde, hasta){
+  return desde <= hasta ? (hoy >= desde && hoy <= hasta) : (hoy >= desde || hoy <= hasta);
+}
+function fechasDeTema(clave, cfg){
+  const f = (cfg.fechas || {})[clave] || {};
+  return {desde: f.desde || TEMAS[clave].desde, hasta: f.hasta || TEMAS[clave].hasta, activo: f.activo !== false};
+}
+function temaQueToca(cfg, hoy = mmddHoy()){
+  cfg = cfg || TEMA_CONFIG_BASE;
+  if(cfg.modo === 'ninguno') return null;
+  if(cfg.modo === 'fijo') return TEMAS[cfg.fijo] ? cfg.fijo : null;
+  for(const clave of Object.keys(TEMAS)){
+    const f = fechasDeTema(clave, cfg);
+    if(f.activo && enRango(hoy, f.desde, f.hasta)) return clave;
+  }
+  return null;
+}
+
+function cintaSVG(c){
+  const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='72' height='18'>`
+    + `<path d='M0 1.5H72' stroke='rgba(0,0,0,.25)' stroke-width='1'/>`
+    + c.map((color, i) => `<path d='M${2 + i*24} 1.5L${22 + i*24} 1.5L${12 + i*24} 16Z' fill='${color}' stroke='rgba(0,0,0,.12)' stroke-width='.6'/>`).join('')
+    + `</svg>`;
+  return `url("data:image/svg+xml,${encodeURIComponent(svg)}")`;
+}
+
+// portal: 'alumno' o 'panel'
+function aplicarTema(clave, portal){
+  document.getElementById('estiloTema')?.remove();
+  document.querySelectorAll('.cinta-tema, .saludo-tema, .particulas-tema').forEach(x => x.remove());
+  document.body.removeAttribute('data-tema');
+  const t = TEMAS[clave];
+  if(!t) return;
+
+  document.body.setAttribute('data-tema', clave);
+  const estilo = document.createElement('style');
+  estilo.id = 'estiloTema';
+  estilo.textContent = `
+    /* El tema cambia el color de la marca (menú, botones, pestañas, fondos
+       oscuros). El verde de los indicadores («bien», aprobado) no cambia,
+       para que un dato bueno nunca se vea como alerta. */
+    :root{--marca:${t.verde};--verde-hondo:${t.hondo};--verde-tinta:${t.tinta};--verde-medio:${t.medio}}
+    a{color:var(--marca)}
+    .menu button.activo{background:var(--marca)}
+    .boton:not(.tenue):not(.peligro){background:var(--marca)}
+    .boton:not(.tenue):not(.peligro):hover{background:var(--marca);filter:brightness(.88)}
+    .pestanas button.activo{color:var(--marca);border-bottom-color:var(--marca)}
+    .activar-avisos{border-left-color:var(--marca)}
+    .campana.con{color:var(--marca);border-color:var(--marca)}
+    .cinta-tema{position:absolute;left:0;right:0;height:18px;pointer-events:none;z-index:2;
+      background:${cintaSVG(t.cinta)} repeat-x 0 0 / 72px 18px}
+    .barra .cinta-tema{bottom:-18px}
+    .acceso-marca .cinta-tema, .acceso-caja .cinta-tema{top:0}
+    .saludo-tema{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;
+      background:${t.verde}14;color:${t.verde};border:1px solid ${t.verde}40;font-size:12.5px;font-weight:650;white-space:nowrap}
+    .acceso-marca .saludo-tema{margin-top:18px;background:rgba(255,255,255,.12);color:#fff;border-color:rgba(255,255,255,.3);font-size:14px}
+    .acceso-caja .saludo-tema{margin:0 auto 14px;display:flex;width:max-content}
+    .particulas-tema{position:fixed;inset:0;pointer-events:none;z-index:70;overflow:hidden}
+    .particulas-tema span{position:absolute;top:-40px;opacity:.75;animation:caerTema linear 2 forwards}
+    @keyframes caerTema{to{transform:translateY(110vh) rotate(200deg)}}
+    @media (max-width:760px){.barra .saludo-tema{display:none}}
+    @media (prefers-reduced-motion:reduce){.particulas-tema{display:none}}`;
+  document.head.appendChild(estilo);
+
+  const cinta = () => { const c = document.createElement('div'); c.className = 'cinta-tema'; return c; };
+  const saludo = () => { const s = document.createElement('span'); s.className = 'saludo-tema';
+    s.textContent = `${t.emoji} ${t.saludo}`; return s; };
+
+  // Encabezado del portal o del panel
+  const barra = document.querySelector('.barra');
+  if(barra){
+    barra.style.position = barra.style.position || 'sticky';
+    barra.appendChild(cinta());
+    const titulo = barra.querySelector('h2');
+    if(titulo) titulo.insertAdjacentElement('afterend', saludo());
+  }
+  // Pantalla de entrada
+  const marca = document.querySelector('.acceso-marca');
+  if(marca){ marca.style.position = 'relative'; marca.appendChild(cinta()); marca.appendChild(saludo()); }
+  const caja = portal === 'panel' ? document.querySelector('#acceso .acceso-caja') : null;
+  if(caja){ caja.style.position = 'relative'; caja.style.overflow = 'hidden'; caja.prepend(saludo()); caja.prepend(cinta()); }
+
+  // Animación breve (cae dos veces y desaparece). En el panel, solo en la entrada.
+  const enEntrada = document.getElementById('acceso') && getComputedStyle(document.getElementById('acceso')).display !== 'none';
+  const animar = temaConfig.animacion !== false && t.particulas.length
+    && (portal === 'alumno' || enEntrada)
+    && !matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if(animar){
+    const caen = document.createElement('div');
+    caen.className = 'particulas-tema';
+    for(let i = 0; i < 16; i++){
+      const s = document.createElement('span');
+      s.textContent = t.particulas[i % t.particulas.length];
+      s.style.left = (Math.random() * 100) + 'vw';
+      s.style.fontSize = (14 + Math.random() * 12) + 'px';
+      s.style.animationDuration = (8 + Math.random() * 7) + 's';
+      s.style.animationDelay = (Math.random() * 6) + 's';
+      caen.appendChild(s);
+    }
+    document.body.appendChild(caen);
+    setTimeout(() => caen.remove(), 45000);
+  }
+}
+
+// Se aplica el tema que toca y se reaplica al cambiar de pantalla
+function ponerTemaVigente(portal){
+  aplicarTema(temaVistaPrevia ?? temaQueToca(temaConfig), portal);
+}
+async function iniciarTemas(portal){
+  try {
+    const guardada = JSON.parse(localStorage.getItem('cbta291_tema') || 'null');
+    if(guardada && typeof guardada === 'object') temaConfig = {...TEMA_CONFIG_BASE, ...guardada};
+  } catch(_) {}
+  ponerTemaVigente(portal);
+  try {
+    const r = await llamar('auth', {accion:'tema'});
+    if(r && r.ok){
+      temaConfig = {...TEMA_CONFIG_BASE, ...(r.tema || {})};
+      try { localStorage.setItem('cbta291_tema', JSON.stringify(temaConfig)); } catch(_) {}
+      ponerTemaVigente(portal);
+    }
+  } catch(_) {}
+}
+
+iniciarTemas('alumno');
 </script>
 </body>
 </html>

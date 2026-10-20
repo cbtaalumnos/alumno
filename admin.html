@@ -42,7 +42,7 @@ a{color:var(--verde)}
 
 /* Acceso */
 #acceso{min-height:100dvh;display:grid;place-items:center;padding:24px;
-  background:radial-gradient(120% 80% at 50% 0%,#1c5c33 0%,var(--verde-hondo) 60%)}
+  background:radial-gradient(120% 80% at 50% 0%,var(--verde-medio,#1c5c33) 0%,var(--verde-hondo) 60%)}
 .acceso-caja{background:var(--papel);border-radius:14px;padding:34px 32px;width:100%;
   max-width:400px;box-shadow:0 24px 60px rgba(0,0,0,.3)}
 .acceso-caja img{width:74px;display:block;margin:0 auto 18px}
@@ -110,6 +110,7 @@ body.visor .etiqueta-consulta{display:inline-block}
 body.visor #menu button[data-vista="importar"],
 body.visor #menu button[data-vista="cierre"],
 body.visor #menu button[data-vista="notificaciones"],
+body.visor #menu button[data-vista="apariencia"],
 body.visor .editar, body.visor .borrar, body.visor .editarRep, body.visor .borrarRep,
 body.visor .borrarJornada, body.visor .borrarH, body.visor .archivoH, body.visor .reset,
 body.visor .renombrar, body.visor .quitarModulo, body.visor .zona-nuevo,
@@ -293,6 +294,7 @@ table.datos input.celda:focus{outline:2px solid var(--cian);outline-offset:0;bor
       <div class="menu-grupo">Comunicación</div>
       <button data-vista="avisos"><span class="ic">✦</span> Avisos</button>
       <button data-vista="notificaciones"><span class="ic">◔</span> Notificaciones</button>
+      <button data-vista="apariencia"><span class="ic">✿</span> Apariencia</button>
 
       <div class="menu-grupo">Cuenta</div>
       <button data-vista="usuarios" class="solo-admin"><span class="ic">◍</span> Usuarios</button>
@@ -626,7 +628,7 @@ const TITULOS = {
   tablero:'Tablero', alumnos:'Alumnos', documentos:'Documentos',
   reportes:'Reportes', asignaciones:'Materias por grupo',
   horarios:'Horarios', grupos:'Grupos', materias:'Materias', docentes:'Docentes', modulos:'Módulos y submódulos',
-  carreras:'Carreras', periodos:'Periodos', avisos:'Avisos', usuarios:'Usuarios del panel', notificaciones:'Notificaciones al alumno',
+  carreras:'Carreras', periodos:'Periodos', avisos:'Avisos', usuarios:'Usuarios del panel', notificaciones:'Notificaciones al alumno', apariencia:'Apariencia del portal',
   importar:'Importar Excel', asistencia:'Asistencia', respaldo:'Respaldo de datos',
   cierre:'Cierre de ciclo', clave:'Mi contraseña'
 };
@@ -642,6 +644,9 @@ $('#velo').addEventListener('click', () => {
 });
 
 async function irA(vista){
+  if(vista !== 'apariencia' && typeof temaVistaPrevia !== 'undefined' && temaVistaPrevia){
+    temaVistaPrevia = null; ponerTemaVigente('panel');
+  }
   vistaActual = vista;
   if(typeof revisarPendientes === 'function') revisarPendientes();
   $$('#menu button').forEach(b => b.classList.toggle('activo', b.dataset.vista === vista));
@@ -673,6 +678,7 @@ async function irA(vista){
     else if(vista==='avisos')         await verCatalogo('avisos');
     else if(vista==='notificaciones') await verNotificaciones();
     else if(vista==='usuarios')       await verUsuarios();
+    else if(vista==='apariencia')     await verApariencia();
     else if(vista==='clave')          verClave();
     else                              await verCatalogo(vista);
   }catch(e){
@@ -3377,6 +3383,131 @@ function formVisor(u){
 }
 
 /* ==========================================================================
+   APARIENCIA · temas conmemorativos
+
+   Automático: cada tema se activa solo en sus fechas.
+   Siempre un tema: se queda puesto hasta que lo cambies.
+   Sin tema: el portal se ve como siempre.
+   El cambio se ve en el portal del alumno, en el panel y en los visores.
+   ========================================================================== */
+const aDDMM = mmdd => { const [m, d] = String(mmdd).split('-'); return `${d}/${m}`; };
+const aMMDD = ddmm => {
+  const m = String(ddmm).trim().match(/^(\d{1,2})\s*[\/\-.]\s*(\d{1,2})$/);
+  if(!m) return null;
+  const d = Number(m[1]), mo = Number(m[2]);
+  if(mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+  return `${String(mo).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+};
+
+async function verApariencia(){
+  // Lo más reciente del servidor
+  const r = await llamar('auth', {accion:'tema'});
+  if(r && r.ok) temaConfig = {...TEMA_CONFIG_BASE, ...(r.tema || {})};
+  if(!temaVistaPrevia) ponerTemaVigente('panel');
+  const cfg = JSON.parse(JSON.stringify(temaConfig));
+  const hoyTema = temaQueToca(cfg);
+
+  $('#vista').innerHTML = `
+    <div class="medidores">
+      <div class="medidor ${hoyTema ? 'bien' : ''}"><div class="r">Hoy se ve</div>
+        <div class="v" style="font-size:22px">${hoyTema ? TEMAS[hoyTema].emoji + ' ' + escapar(TEMAS[hoyTema].nombre) : 'Sin tema'}</div>
+        <div class="n">${cfg.modo === 'auto' ? 'por calendario' : cfg.modo === 'fijo' ? 'tema fijo' : 'temas apagados'}</div></div>
+    </div>
+
+    <div class="tarjeta" style="margin-top:18px">
+      <h3>¿Cómo se elige el tema?</h3>
+      <div class="cuerpo" style="display:grid;gap:10px;font-size:14px">
+        <label style="display:flex;gap:10px;align-items:flex-start">
+          <input type="radio" name="modoTema" value="auto" ${cfg.modo === 'auto' ? 'checked' : ''} style="margin-top:3px">
+          <span><b>Automático por calendario</b><br><span style="color:var(--texto-suave);font-size:13px">
+            Cada tema se activa y se apaga solo en las fechas de la tabla de abajo.</span></span></label>
+        <label style="display:flex;gap:10px;align-items:flex-start">
+          <input type="radio" name="modoTema" value="fijo" ${cfg.modo === 'fijo' ? 'checked' : ''} style="margin-top:3px">
+          <span><b>Siempre este tema:</b>
+            <select id="temaFijo" style="margin-left:6px;padding:4px 8px;border:1.5px solid var(--linea-fuerte);border-radius:7px">
+              ${Object.entries(TEMAS).map(([k, t]) => `<option value="${k}"${cfg.fijo === k ? ' selected' : ''}>${t.emoji} ${escapar(t.nombre)}</option>`).join('')}
+            </select><br><span style="color:var(--texto-suave);font-size:13px">
+            Se queda puesto, sin importar la fecha, hasta que lo cambies.</span></span></label>
+        <label style="display:flex;gap:10px;align-items:flex-start">
+          <input type="radio" name="modoTema" value="ninguno" ${cfg.modo === 'ninguno' ? 'checked' : ''} style="margin-top:3px">
+          <span><b>Sin tema</b><br><span style="color:var(--texto-suave);font-size:13px">
+            El portal se ve siempre con los colores normales.</span></span></label>
+        <label style="display:flex;gap:10px;align-items:center;margin-top:6px;padding-top:12px;border-top:1px solid var(--linea)">
+          <input type="checkbox" id="temaAnim" ${cfg.animacion !== false ? 'checked' : ''}>
+          <span>Animación breve (nieve, corazones, murciélagos…) al entrar al portal del alumno</span></label>
+      </div>
+    </div>
+
+    <div class="tarjeta" style="margin-top:18px">
+      <h3>Temas y fechas <span style="font-weight:400;color:var(--texto-suave);font-size:12.5px;margin-left:8px">día/mes · se repiten cada año</span></h3>
+      <div class="tabla-marco"><table class="datos" style="min-width:0">
+        <thead><tr><th style="width:60px">Activo</th><th>Tema</th><th>Desde</th><th>Hasta</th><th></th></tr></thead>
+        <tbody>${Object.entries(TEMAS).map(([k, t]) => {
+          const f = fechasDeTema(k, cfg);
+          return `<tr data-tema="${k}">
+            <td><input type="checkbox" class="temaActivo" ${f.activo ? 'checked' : ''}></td>
+            <td><span style="font-size:18px">${t.emoji}</span> <b>${escapar(t.nombre)}</b>
+              <span style="display:inline-flex;gap:3px;margin-left:8px;vertical-align:middle">${[t.verde, t.hondo, ...t.cinta]
+                .map(c => `<i style="width:12px;height:12px;border-radius:3px;background:${c};border:1px solid rgba(0,0,0,.15);display:inline-block"></i>`).join('')}</span>
+              <div style="font-size:12px;color:var(--texto-suave);margin-top:2px">«${escapar(t.saludo)}»</div></td>
+            <td><input class="temaDesde" value="${aDDMM(f.desde)}" maxlength="5" style="width:70px;padding:5px 8px;border:1.5px solid var(--linea-fuerte);border-radius:7px"></td>
+            <td><input class="temaHasta" value="${aDDMM(f.hasta)}" maxlength="5" style="width:70px;padding:5px 8px;border:1.5px solid var(--linea-fuerte);border-radius:7px"></td>
+            <td class="acciones"><button class="boton tenue chico probarTema">Vista previa</button></td>
+          </tr>`;
+        }).join('')}</tbody>
+      </table></div>
+      <p class="aviso-nota" style="padding:0 17px 15px">Si las fechas de dos temas se cruzan, se usa el primero de la lista.
+        Un rango puede pasar de un año a otro (por ejemplo, del 01/12 al 06/01).</p>
+    </div>
+
+    <div id="avisoVista"></div>
+    <div style="margin-top:18px;display:flex;gap:10px;flex-wrap:wrap">
+      <button class="boton" id="btnGuardarTema">Guardar</button>
+    </div>
+    <div id="recadoTema"></div>`;
+
+  const quitarVista = () => {
+    temaVistaPrevia = null; ponerTemaVigente('panel'); $('#avisoVista').innerHTML = '';
+  };
+
+  $('#vista').addEventListener('click', ev => {
+    if(vistaActual !== 'apariencia') return;
+    const b = ev.target.closest('.probarTema');
+    if(b){
+      const k = b.closest('tr').dataset.tema;
+      temaVistaPrevia = k; ponerTemaVigente('panel');
+      $('#avisoVista').innerHTML = `<div class="recado ojo" style="margin-top:18px">
+        Vista previa de <b>${escapar(TEMAS[k].nombre)}</b>: solo la ves tú y se quita al salir de esta pantalla.
+        <button class="boton tenue chico" id="btnQuitarVista" style="margin-left:10px">Quitar vista previa</button></div>`;
+      $('#btnQuitarVista').addEventListener('click', quitarVista);
+      window.scrollTo({top:0, behavior:'smooth'});
+    }
+  });
+
+  $('#btnGuardarTema').addEventListener('click', async ev => {
+    const modo = document.querySelector('input[name="modoTema"]:checked')?.value || 'auto';
+    const fechas = {};
+    for(const tr of $$('#vista tr[data-tema]')){
+      const k = tr.dataset.tema;
+      const desde = aMMDD(tr.querySelector('.temaDesde').value), hasta = aMMDD(tr.querySelector('.temaHasta').value);
+      if(!desde || !hasta){ recado('#recadoTema', `Revisa las fechas de «${TEMAS[k].nombre}». Escríbelas como día/mes, por ejemplo 24/10.`); return; }
+      fechas[k] = {desde, hasta, activo: tr.querySelector('.temaActivo').checked};
+    }
+    const tema = {modo, fijo: modo === 'fijo' ? $('#temaFijo').value : '', fechas, animacion: $('#temaAnim').checked};
+    ev.target.disabled = true; ev.target.textContent = 'Guardando…';
+    const res = await api('guardar_tema', {tema});
+    ev.target.disabled = false; ev.target.textContent = 'Guardar';
+    if(!res.ok){ recado('#recadoTema', res.error); return; }
+    temaConfig = {...TEMA_CONFIG_BASE, ...res.tema};
+    try { localStorage.setItem('cbta291_tema', JSON.stringify(temaConfig)); } catch(_) {}
+    temaVistaPrevia = null;
+    ponerTemaVigente('panel');
+    irA('apariencia');
+    setTimeout(() => recado('#recadoTema', 'Guardado. Los alumnos lo verán la próxima vez que abran o recarguen su portal.', 'bien'), 300);
+  });
+}
+
+/* ==========================================================================
    HORARIOS  ·  una imagen por grupo
 
    La imagen se reduce y se convierte a JPEG en el navegador antes de subirla,
@@ -5378,6 +5509,181 @@ function verClave(){
     bolsa.tira('cbta291adm_token'); bolsa.tira('cbta291adm_admin');
   }
 })();
+
+/* ==========================================================================
+   TEMAS CONMEMORATIVOS
+
+   Cambian los colores, ponen una cinta de banderines en el encabezado, un
+   saludo y, en el portal del alumno, una animación breve. Las tablas, los
+   formularios y los datos no cambian.
+
+   Cómo se elige el tema:
+   1. Al abrir la página se aplica el calendario de abajo (sin esperar a
+      la red), o el último tema que se descargó.
+   2. Después se consulta lo que se configuró en el panel (Apariencia):
+      automático por calendario, un tema fijo, o ninguno.
+   ========================================================================== */
+const TEMAS = {
+  halloween: {nombre:'Halloween', emoji:'🎃', saludo:'¡Feliz Halloween!', desde:'10-24', hasta:'11-02',
+    verde:'#C2410C', medio:'#5B2A6E', hondo:'#2B1036', tinta:'#1C0A24',
+    cinta:['#F97316','#6D28D9','#1F1F1F'], particulas:['🦇','🎃','🦇','🕸️']},
+  revolucion: {nombre:'Revolución Mexicana', emoji:'⭐', saludo:'Aniversario de la Revolución Mexicana', desde:'11-17', hasta:'11-21',
+    verde:'#9A3412', medio:'#5C3D1E', hondo:'#33210F', tinta:'#221509',
+    cinta:['#006847','#FFFFFF','#CE1126'], particulas:[]},
+  navidad: {nombre:'Navidad y fin de año', emoji:'🎄', saludo:'¡Felices fiestas!', desde:'12-01', hasta:'01-06',
+    verde:'#B91C1C', medio:'#1E5A3C', hondo:'#0F3D2A', tinta:'#082419',
+    cinta:['#DC2626','#FACC15','#16A34A'], particulas:['❄','❅','❆','❄']},
+  amor: {nombre:'Amor y Amistad', emoji:'💖', saludo:'¡Feliz Día del Amor y la Amistad!', desde:'02-10', hasta:'02-15',
+    verde:'#BE185D', medio:'#86174A', hondo:'#4C0A27', tinta:'#33061A',
+    cinta:['#F472B6','#E11D48','#FBCFE8'], particulas:['❤','💕','❤','💗']},
+  bandera: {nombre:'Día de la Bandera', emoji:'🇲🇽', saludo:'24 de febrero · Día de la Bandera', desde:'02-22', hasta:'02-25',
+    verde:'#006847', medio:'#0B5A3E', hondo:'#003D2A', tinta:'#00291C',
+    cinta:['#006847','#FFFFFF','#CE1126'], particulas:[]},
+  maestro: {nombre:'Día del Maestro', emoji:'🍎', saludo:'¡Feliz Día del Maestro!', desde:'05-13', hasta:'05-16',
+    verde:'#1D4ED8', medio:'#1E3A8A', hondo:'#172554', tinta:'#0E1736',
+    cinta:['#3B82F6','#FACC15','#EF4444'], particulas:['🍎','📚','✏️']},
+  estudiante: {nombre:'Día del Estudiante', emoji:'🎓', saludo:'¡Feliz Día del Estudiante!', desde:'05-21', hasta:'05-24',
+    verde:'#7C3AED', medio:'#4C1D95', hondo:'#2E1065', tinta:'#1E0A45',
+    cinta:['#A78BFA','#FACC15','#22D3EE'], particulas:['🎓','✏️','⭐']},
+  patrias: {nombre:'Fiestas Patrias', emoji:'🇲🇽', saludo:'¡Viva México!', desde:'09-01', hasta:'09-17',
+    verde:'#006847', medio:'#0B5A3E', hondo:'#003D2A', tinta:'#00291C',
+    cinta:['#006847','#FFFFFF','#CE1126'], particulas:['🎉','⭐','🎊']}
+};
+
+const TEMA_CONFIG_BASE = {modo:'auto', fijo:'', fechas:{}, animacion:true};
+let temaConfig = TEMA_CONFIG_BASE;
+let temaVistaPrevia = null;   // solo en el panel, mientras se prueba un tema
+
+function mmddHoy(){
+  const [, m, d] = new Date().toLocaleDateString('en-CA', {timeZone:'America/Cancun'}).split('-');
+  return `${m}-${d}`;
+}
+// ¿La fecha MM-DD cae dentro del rango? (el rango puede cruzar de año: 12-01 → 01-06)
+function enRango(hoy, desde, hasta){
+  return desde <= hasta ? (hoy >= desde && hoy <= hasta) : (hoy >= desde || hoy <= hasta);
+}
+function fechasDeTema(clave, cfg){
+  const f = (cfg.fechas || {})[clave] || {};
+  return {desde: f.desde || TEMAS[clave].desde, hasta: f.hasta || TEMAS[clave].hasta, activo: f.activo !== false};
+}
+function temaQueToca(cfg, hoy = mmddHoy()){
+  cfg = cfg || TEMA_CONFIG_BASE;
+  if(cfg.modo === 'ninguno') return null;
+  if(cfg.modo === 'fijo') return TEMAS[cfg.fijo] ? cfg.fijo : null;
+  for(const clave of Object.keys(TEMAS)){
+    const f = fechasDeTema(clave, cfg);
+    if(f.activo && enRango(hoy, f.desde, f.hasta)) return clave;
+  }
+  return null;
+}
+
+function cintaSVG(c){
+  const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='72' height='18'>`
+    + `<path d='M0 1.5H72' stroke='rgba(0,0,0,.25)' stroke-width='1'/>`
+    + c.map((color, i) => `<path d='M${2 + i*24} 1.5L${22 + i*24} 1.5L${12 + i*24} 16Z' fill='${color}' stroke='rgba(0,0,0,.12)' stroke-width='.6'/>`).join('')
+    + `</svg>`;
+  return `url("data:image/svg+xml,${encodeURIComponent(svg)}")`;
+}
+
+// portal: 'alumno' o 'panel'
+function aplicarTema(clave, portal){
+  document.getElementById('estiloTema')?.remove();
+  document.querySelectorAll('.cinta-tema, .saludo-tema, .particulas-tema').forEach(x => x.remove());
+  document.body.removeAttribute('data-tema');
+  const t = TEMAS[clave];
+  if(!t) return;
+
+  document.body.setAttribute('data-tema', clave);
+  const estilo = document.createElement('style');
+  estilo.id = 'estiloTema';
+  estilo.textContent = `
+    /* El tema cambia el color de la marca (menú, botones, pestañas, fondos
+       oscuros). El verde de los indicadores («bien», aprobado) no cambia,
+       para que un dato bueno nunca se vea como alerta. */
+    :root{--marca:${t.verde};--verde-hondo:${t.hondo};--verde-tinta:${t.tinta};--verde-medio:${t.medio}}
+    a{color:var(--marca)}
+    .menu button.activo{background:var(--marca)}
+    .boton:not(.tenue):not(.peligro){background:var(--marca)}
+    .boton:not(.tenue):not(.peligro):hover{background:var(--marca);filter:brightness(.88)}
+    .pestanas button.activo{color:var(--marca);border-bottom-color:var(--marca)}
+    .activar-avisos{border-left-color:var(--marca)}
+    .campana.con{color:var(--marca);border-color:var(--marca)}
+    .cinta-tema{position:absolute;left:0;right:0;height:18px;pointer-events:none;z-index:2;
+      background:${cintaSVG(t.cinta)} repeat-x 0 0 / 72px 18px}
+    .barra .cinta-tema{bottom:-18px}
+    .acceso-marca .cinta-tema, .acceso-caja .cinta-tema{top:0}
+    .saludo-tema{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;
+      background:${t.verde}14;color:${t.verde};border:1px solid ${t.verde}40;font-size:12.5px;font-weight:650;white-space:nowrap}
+    .acceso-marca .saludo-tema{margin-top:18px;background:rgba(255,255,255,.12);color:#fff;border-color:rgba(255,255,255,.3);font-size:14px}
+    .acceso-caja .saludo-tema{margin:0 auto 14px;display:flex;width:max-content}
+    .particulas-tema{position:fixed;inset:0;pointer-events:none;z-index:70;overflow:hidden}
+    .particulas-tema span{position:absolute;top:-40px;opacity:.75;animation:caerTema linear 2 forwards}
+    @keyframes caerTema{to{transform:translateY(110vh) rotate(200deg)}}
+    @media (max-width:760px){.barra .saludo-tema{display:none}}
+    @media (prefers-reduced-motion:reduce){.particulas-tema{display:none}}`;
+  document.head.appendChild(estilo);
+
+  const cinta = () => { const c = document.createElement('div'); c.className = 'cinta-tema'; return c; };
+  const saludo = () => { const s = document.createElement('span'); s.className = 'saludo-tema';
+    s.textContent = `${t.emoji} ${t.saludo}`; return s; };
+
+  // Encabezado del portal o del panel
+  const barra = document.querySelector('.barra');
+  if(barra){
+    barra.style.position = barra.style.position || 'sticky';
+    barra.appendChild(cinta());
+    const titulo = barra.querySelector('h2');
+    if(titulo) titulo.insertAdjacentElement('afterend', saludo());
+  }
+  // Pantalla de entrada
+  const marca = document.querySelector('.acceso-marca');
+  if(marca){ marca.style.position = 'relative'; marca.appendChild(cinta()); marca.appendChild(saludo()); }
+  const caja = portal === 'panel' ? document.querySelector('#acceso .acceso-caja') : null;
+  if(caja){ caja.style.position = 'relative'; caja.style.overflow = 'hidden'; caja.prepend(saludo()); caja.prepend(cinta()); }
+
+  // Animación breve (cae dos veces y desaparece). En el panel, solo en la entrada.
+  const enEntrada = document.getElementById('acceso') && getComputedStyle(document.getElementById('acceso')).display !== 'none';
+  const animar = temaConfig.animacion !== false && t.particulas.length
+    && (portal === 'alumno' || enEntrada)
+    && !matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if(animar){
+    const caen = document.createElement('div');
+    caen.className = 'particulas-tema';
+    for(let i = 0; i < 16; i++){
+      const s = document.createElement('span');
+      s.textContent = t.particulas[i % t.particulas.length];
+      s.style.left = (Math.random() * 100) + 'vw';
+      s.style.fontSize = (14 + Math.random() * 12) + 'px';
+      s.style.animationDuration = (8 + Math.random() * 7) + 's';
+      s.style.animationDelay = (Math.random() * 6) + 's';
+      caen.appendChild(s);
+    }
+    document.body.appendChild(caen);
+    setTimeout(() => caen.remove(), 45000);
+  }
+}
+
+// Se aplica el tema que toca y se reaplica al cambiar de pantalla
+function ponerTemaVigente(portal){
+  aplicarTema(temaVistaPrevia ?? temaQueToca(temaConfig), portal);
+}
+async function iniciarTemas(portal){
+  try {
+    const guardada = JSON.parse(localStorage.getItem('cbta291_tema') || 'null');
+    if(guardada && typeof guardada === 'object') temaConfig = {...TEMA_CONFIG_BASE, ...guardada};
+  } catch(_) {}
+  ponerTemaVigente(portal);
+  try {
+    const r = await llamar('auth', {accion:'tema'});
+    if(r && r.ok){
+      temaConfig = {...TEMA_CONFIG_BASE, ...(r.tema || {})};
+      try { localStorage.setItem('cbta291_tema', JSON.stringify(temaConfig)); } catch(_) {}
+      ponerTemaVigente(portal);
+    }
+  } catch(_) {}
+}
+
+iniciarTemas('panel');
 </script>
 </body>
 </html>
