@@ -1898,7 +1898,7 @@ const CAMPOS_ALUMNO = [
   {c:'activo', r:'Activo', tipo:'bool'}
 ];
 
-let filtroAlumnos = {grupo_id:'', busqueda:'', acceso:''};
+let filtroAlumnos = {grupo_id:'', busqueda:'', acceso:'', fechaEdad:''};
 
 /* Sexo y fecha de nacimiento: se usa lo que capturó el alumno en su portal
    y, si falta, se toma de su CURP (posición 11 = H/M, posiciones 5-10 =
@@ -1986,8 +1986,13 @@ async function verAlumnos(){
                                  : filtroAlumnos.acceso === 'sin' ? !a.password_hash : true);
   const colorPct = p => p >= 80 ? 'var(--verde)' : p >= 50 ? 'var(--ambar)' : 'var(--rojo)';
 
-  // Hombres, mujeres y edades (solo activos, con los filtros de grupo y búsqueda)
-  const hoy = hoyLocal();
+  // Hombres, mujeres y edades (solo activos, con los filtros de grupo y búsqueda).
+  // La edad se calcula a la fecha elegida; si no se elige, a hoy.
+  const hoyReal = hoyLocal();
+  const hoy = /^\d{4}-\d{2}-\d{2}$/.test(filtroAlumnos.fechaEdad)
+    ? (([y, mo, d]) => ({y, mo, d, iso: filtroAlumnos.fechaEdad}))(filtroAlumnos.fechaEdad.split('-').map(Number))
+    : hoyReal;
+  const fechaCorte = `${String(hoy.d).padStart(2,'0')}/${String(hoy.mo).padStart(2,'0')}/${hoy.y}`;
   const nombreCompleto = a => `${a.apellido_paterno ?? ''} ${a.apellido_materno ?? ''} ${a.nombres ?? ''}`.replace(/\s+/g,' ').trim();
   const perfiles = activos.map(a => {
     const sx = sexoDe(a), nac = nacimientoDe(a);
@@ -2038,7 +2043,12 @@ async function verAlumnos(){
       <h3>Hombres y mujeres
         <span style="font-weight:400;color:var(--texto-suave)">· ${
           filtroAlumnos.grupo_id ? escapar(etiquetaRef('grupos', Number(filtroAlumnos.grupo_id))) : 'todo el plantel'}</span>
-        <span class="der" style="display:flex;gap:8px;flex-wrap:wrap">
+        <span class="der" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <label style="font-size:12.5px;color:var(--texto-suave);display:flex;align-items:center;gap:6px;font-weight:400">
+            Edad al
+            <input type="date" id="fEdad" value="${hoy.iso}" style="padding:4px 8px;border:1.5px solid var(--linea-fuerte);border-radius:7px;font-size:13px">
+            ${hoy.iso !== hoyReal.iso ? '<button class="boton tenue chico" id="btnEdadHoy" title="Volver a la fecha de hoy">Hoy</button>' : ''}
+          </label>
           <button class="boton tenue chico" id="btnExpSexo">Exportar hombres y mujeres</button>
           <button class="boton tenue chico" id="btnExpEdades">Exportar edades</button>
         </span></h3>
@@ -2057,7 +2067,7 @@ async function verAlumnos(){
           </div>
           <div style="font-size:13px;color:var(--texto-suave);line-height:1.6;min-width:220px">
             <b style="color:var(--texto)">${perfiles.length}</b> alumnos activos<br>
-            ${edades.length ? `Edades: de <b style="color:var(--texto)">${Math.min(...edades)}</b> a
+            ${edades.length ? `Edades al ${hoy.iso === hoyReal.iso ? 'día de hoy' : '<b style="color:var(--texto)">' + fechaCorte + '</b>'}: de <b style="color:var(--texto)">${Math.min(...edades)}</b> a
               <b style="color:var(--texto)">${Math.max(...edades)}</b> años ·
               promedio <b style="color:var(--texto)">${(edades.reduce((s, e) => s + e, 0) / edades.length).toFixed(1)}</b><br>` : ''}
             ${deCurp ? `<span style="font-size:12px">${deCurp} tomado${deCurp === 1 ? '' : 's'} de la CURP porque el alumno aún no lo captura</span>` : ''}
@@ -2164,6 +2174,14 @@ async function verAlumnos(){
     exportarLibro('hombres_y_mujeres' + sufijo, hojas);
   });
 
+  const fEdad = $('#fEdad');
+  if(fEdad) fEdad.addEventListener('change', () => {
+    filtroAlumnos.fechaEdad = fEdad.value === hoyReal.iso ? '' : fEdad.value;
+    irA('alumnos');
+  });
+  const bHoy = $('#btnEdadHoy');
+  if(bHoy) bHoy.addEventListener('click', ev => { ev.preventDefault(); filtroAlumnos.fechaEdad = ''; irA('alumnos'); });
+
   const bEdad = $('#btnExpEdades');
   if(bEdad) bEdad.addEventListener('click', () => {
     const lista = perfiles.map(p => ({...fila(p), sexo: p.sexo,
@@ -2178,8 +2196,8 @@ async function verAlumnos(){
     });
     const resumen = [...porEdad.values()].sort((x, y) => (typeof x.edad === 'number' ? x.edad : 999) - (typeof y.edad === 'number' ? y.edad : 999))
       .map(x => ({...x, edad: typeof x.edad === 'number' ? `${x.edad} años` : x.edad}));
-    const fechaTxt = `${String(hoy.d).padStart(2,'0')}-${String(hoy.mo).padStart(2,'0')}-${hoy.y}`;
-    exportarLibro('edades' + sufijo, [
+    const fechaTxt = fechaCorte.replace(/\//g, '-');
+    exportarLibro((hoy.iso === hoyReal.iso ? 'edades' : 'edades_al_' + fechaTxt) + sufijo, [
       {nombre:`Edades al ${fechaTxt}`, columnas:['grupo','matricula','nombre','sexo','nacimiento','edad','dato'],
        titulos:['Grupo','Matrícula','Nombre','Sexo','Fecha de nacimiento',`Edad al ${fechaTxt}`,'Dato tomado de'], filas: lista},
       {nombre:'Resumen por edad', columnas:['edad','hombres','mujeres','otro','total'],
