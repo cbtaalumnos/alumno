@@ -1900,13 +1900,65 @@ const CAMPOS_ALUMNO = [
 
 let filtroAlumnos = {grupo_id:'', busqueda:'', acceso:''};
 
+/* Sexo y fecha de nacimiento: se usa lo que capturó el alumno en su portal
+   y, si falta, se toma de su CURP (posición 11 = H/M, posiciones 5-10 =
+   AAMMDD; el carácter 17 es número para nacidos antes de 2000 y letra
+   después). */
+function sexoDe(a){
+  const s = String(a.sexo || '').toUpperCase().trim();
+  if(s.startsWith('MASC') || s === 'H' || s === 'HOMBRE') return {sexo:'HOMBRE', fuente:'Capturado'};
+  if(s.startsWith('FEM')  || s === 'M' || s === 'MUJER')  return {sexo:'MUJER',  fuente:'Capturado'};
+  if(s === 'OTRO') return {sexo:'OTRO', fuente:'Capturado'};
+  const c = String(a.curp || '').toUpperCase().trim();
+  if(/^[A-Z]{4}\d{6}[HMX]/.test(c))
+    return {sexo: c[10] === 'H' ? 'HOMBRE' : c[10] === 'M' ? 'MUJER' : 'OTRO', fuente:'CURP'};
+  return {sexo:'SIN DATO', fuente:''};
+}
+function nacimientoDe(a){
+  if(a.fecha_nacimiento) return {fecha: String(a.fecha_nacimiento).slice(0,10), fuente:'Capturada'};
+  const m = String(a.curp || '').toUpperCase().trim()
+    .match(/^[A-Z]{4}(\d{2})(\d{2})(\d{2})[HMX][A-Z]{5}([0-9A-Z])/);
+  if(m){
+    const anio = (/\d/.test(m[4]) ? 1900 : 2000) + Number(m[1]);
+    const f = `${anio}-${m[2]}-${m[3]}`;
+    const d = new Date(f + 'T12:00:00');
+    if(!isNaN(d) && d.getMonth() + 1 === Number(m[2])) return {fecha: f, fuente:'CURP'};
+  }
+  return {fecha:null, fuente:''};
+}
+// Hoy en Quintana Roo
+function hoyLocal(){
+  const [y, mo, d] = new Date().toLocaleDateString('en-CA', {timeZone:'America/Cancun'}).split('-').map(Number);
+  return {y, mo, d, iso: `${y}-${String(mo).padStart(2,'0')}-${String(d).padStart(2,'0')}`};
+}
+function edadAl(fechaISO, hoy){
+  const [y, mo, d] = fechaISO.split('-').map(Number);
+  let e = hoy.y - y;
+  if(hoy.mo < mo || (hoy.mo === mo && hoy.d < d)) e--;
+  return e;
+}
+// Libro de Excel con varias hojas
+function exportarLibro(nombre, hojas){
+  const hoy = hoyLocal().iso;
+  if(typeof XLSX === 'undefined'){ exportarCSV(nombre, hojas[hojas.length - 1].filas, hojas[hojas.length - 1].columnas); return; }
+  const libro = XLSX.utils.book_new();
+  hojas.forEach(h => {
+    const cols = h.columnas;
+    const matriz = [h.titulos || cols].concat(h.filas.map(f => cols.map(c => f[c] ?? '')));
+    const hoja = XLSX.utils.aoa_to_sheet(matriz);
+    hoja['!cols'] = cols.map((c, i) => ({wch: Math.min(48, Math.max(10, ...matriz.map(r => String(r[i] ?? '').length + 2)))}));
+    XLSX.utils.book_append_sheet(libro, hoja, h.nombre.slice(0, 31));
+  });
+  XLSX.writeFile(libro, `${nombre}_${hoy}.xlsx`);
+}
+
 async function verAlumnos(){
   const filtros = {};
   if(filtroAlumnos.grupo_id) filtros.grupo_id = Number(filtroAlumnos.grupo_id);
 
   const r = await api('listar', {
     tabla:'alumnos',
-    columnas:'id,matricula,curp,nombres,apellido_paterno,apellido_materno,grupo_id,carrera_id,estatus,activo,celular,password_hash',
+    columnas:'id,matricula,curp,nombres,apellido_paterno,apellido_materno,grupo_id,carrera_id,estatus,activo,celular,password_hash,sexo,fecha_nacimiento',
     filtros,
     busqueda: filtroAlumnos.busqueda || undefined,
     campo_busqueda: filtroAlumnos.busqueda ? 'apellido_paterno' : undefined,
@@ -1934,6 +1986,28 @@ async function verAlumnos(){
                                  : filtroAlumnos.acceso === 'sin' ? !a.password_hash : true);
   const colorPct = p => p >= 80 ? 'var(--verde)' : p >= 50 ? 'var(--ambar)' : 'var(--rojo)';
 
+  // Hombres, mujeres y edades (solo activos, con los filtros de grupo y búsqueda)
+  const hoy = hoyLocal();
+  const nombreCompleto = a => `${a.apellido_paterno ?? ''} ${a.apellido_materno ?? ''} ${a.nombres ?? ''}`.replace(/\s+/g,' ').trim();
+  const perfiles = activos.map(a => {
+    const sx = sexoDe(a), nac = nacimientoDe(a);
+    const g = a.grupo_id ? buscaEn('grupos', a.grupo_id) : null;
+    return {a, g, grupo: g ? nombreGrupo(g) : 'Sin grupo', sexo: sx.sexo, fuenteSexo: sx.fuente,
+            nacimiento: nac.fecha, fuenteNac: nac.fuente, edad: nac.fecha ? edadAl(nac.fecha, hoy) : null};
+  }).sort((x, y) => (x.g && y.g ? ORDENES.grupos(x.g, y.g) : (x.g ? -1 : y.g ? 1 : 0))
+                    || ORDENES.alumnos(x.a, y.a));
+  const cuenta = s => perfiles.filter(p => p.sexo === s).length;
+  const nH = cuenta('HOMBRE'), nM = cuenta('MUJER'), nO = cuenta('OTRO'), nS = cuenta('SIN DATO');
+  const pct = n => perfiles.length ? Math.round(100 * n / perfiles.length) : 0;
+  const deCurp = perfiles.filter(p => p.fuenteSexo === 'CURP').length;
+  const edades = perfiles.map(p => p.edad).filter(e => e !== null);
+  const sexoPorGrupo = new Map();
+  perfiles.forEach(p => {
+    if(!sexoPorGrupo.has(p.grupo)) sexoPorGrupo.set(p.grupo, {grupo: p.grupo, H:0, M:0, O:0, total:0});
+    const x = sexoPorGrupo.get(p.grupo);
+    x.total++; if(p.sexo === 'HOMBRE') x.H++; else if(p.sexo === 'MUJER') x.M++; else x.O++;
+  });
+
   $('#vista').innerHTML = `
     <div class="herramientas">
       <div class="campo">
@@ -1958,6 +2032,46 @@ async function verAlumnos(){
       <button class="boton tenue" id="btnImportar">Importar lista</button>
       <button class="boton" id="btnNuevoAlumno">Agregar alumno</button>
     </div>
+
+    ${perfiles.length ? `
+    <div class="tarjeta" style="margin-bottom:18px">
+      <h3>Hombres y mujeres
+        <span style="font-weight:400;color:var(--texto-suave)">· ${
+          filtroAlumnos.grupo_id ? escapar(etiquetaRef('grupos', Number(filtroAlumnos.grupo_id))) : 'todo el plantel'}</span>
+        <span class="der" style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="boton tenue chico" id="btnExpSexo">Exportar hombres y mujeres</button>
+          <button class="boton tenue chico" id="btnExpEdades">Exportar edades</button>
+        </span></h3>
+      <div class="cuerpo">
+        <div style="display:flex;flex-wrap:wrap;gap:22px;align-items:flex-start">
+          <div style="display:flex;gap:26px;min-width:260px">
+            <div><div style="font-size:12.5px;color:var(--texto-suave)">Hombres</div>
+              <div style="font-size:34px;font-weight:800;line-height:1.1;color:#2B4FA2">${nH}</div>
+              <div style="font-size:12.5px;color:var(--texto-suave)">${pct(nH)}%</div></div>
+            <div><div style="font-size:12.5px;color:var(--texto-suave)">Mujeres</div>
+              <div style="font-size:34px;font-weight:800;line-height:1.1;color:#B0306A">${nM}</div>
+              <div style="font-size:12.5px;color:var(--texto-suave)">${pct(nM)}%</div></div>
+            ${nO || nS ? `<div><div style="font-size:12.5px;color:var(--texto-suave)">${nS ? 'Otro / sin dato' : 'Otro'}</div>
+              <div style="font-size:34px;font-weight:800;line-height:1.1">${nO + nS}</div>
+              <div style="font-size:12.5px;color:var(--texto-suave)">${pct(nO + nS)}%</div></div>` : ''}
+          </div>
+          <div style="font-size:13px;color:var(--texto-suave);line-height:1.6;min-width:220px">
+            <b style="color:var(--texto)">${perfiles.length}</b> alumnos activos<br>
+            ${edades.length ? `Edades: de <b style="color:var(--texto)">${Math.min(...edades)}</b> a
+              <b style="color:var(--texto)">${Math.max(...edades)}</b> años ·
+              promedio <b style="color:var(--texto)">${(edades.reduce((s, e) => s + e, 0) / edades.length).toFixed(1)}</b><br>` : ''}
+            ${deCurp ? `<span style="font-size:12px">${deCurp} tomado${deCurp === 1 ? '' : 's'} de la CURP porque el alumno aún no lo captura</span>` : ''}
+          </div>
+          ${!filtroAlumnos.grupo_id && sexoPorGrupo.size > 1 ? `
+          <div style="flex:1;min-width:300px;display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:4px 22px;font-size:13px">
+            ${[...sexoPorGrupo.values()].map(x => `<div style="display:flex;justify-content:space-between;gap:10px;padding:3px 0;border-bottom:1px solid var(--linea)">
+              <b>${escapar(x.grupo)}</b>
+              <span style="font-variant-numeric:tabular-nums"><span style="color:#2B4FA2">${x.H} H</span> ·
+                <span style="color:#B0306A">${x.M} M</span>${x.O ? ` · ${x.O} otro` : ''}</span></div>`).join('')}
+          </div>` : ''}
+        </div>
+      </div>
+    </div>` : ''}
 
     ${activos.length ? `
     <div class="tarjeta" style="margin-bottom:18px">
@@ -2027,6 +2141,50 @@ async function verAlumnos(){
     irA('alumnos');
   });
   $('#fAcceso').addEventListener('change', () => $('#btnBuscar').click());
+
+  const sufijo = filtroAlumnos.grupo_id
+    ? '_' + nombreArchivoSeguro(etiquetaRef('grupos', Number(filtroAlumnos.grupo_id))) : '';
+  const fila = p => ({grupo: p.grupo, matricula: p.a.matricula, nombre: nombreCompleto(p.a)});
+
+  const bSexo = $('#btnExpSexo');
+  if(bSexo) bSexo.addEventListener('click', () => {
+    const resumen = [...sexoPorGrupo.values()].map(x => ({grupo: x.grupo, hombres: x.H, mujeres: x.M, otro: x.O, total: x.total}));
+    resumen.push({grupo:'TOTAL', hombres: nH, mujeres: nM, otro: nO + nS, total: perfiles.length});
+    const lista = s => perfiles.filter(p => p.sexo === s).map(p => ({...fila(p), dato: p.fuenteSexo}));
+    const hojas = [
+      {nombre:'Resumen', columnas:['grupo','hombres','mujeres','otro','total'],
+       titulos:['Grupo','Hombres','Mujeres','Otro / sin dato','Total'], filas: resumen},
+      {nombre:`Hombres (${nH})`, columnas:['grupo','matricula','nombre','dato'],
+       titulos:['Grupo','Matrícula','Nombre','Dato tomado de'], filas: lista('HOMBRE')},
+      {nombre:`Mujeres (${nM})`, columnas:['grupo','matricula','nombre','dato'],
+       titulos:['Grupo','Matrícula','Nombre','Dato tomado de'], filas: lista('MUJER')}];
+    if(nO + nS) hojas.push({nombre:`Otro o sin dato (${nO + nS})`, columnas:['grupo','matricula','nombre','sexo'],
+       titulos:['Grupo','Matrícula','Nombre','Sexo'],
+       filas: perfiles.filter(p => p.sexo === 'OTRO' || p.sexo === 'SIN DATO').map(p => ({...fila(p), sexo: p.sexo}))});
+    exportarLibro('hombres_y_mujeres' + sufijo, hojas);
+  });
+
+  const bEdad = $('#btnExpEdades');
+  if(bEdad) bEdad.addEventListener('click', () => {
+    const lista = perfiles.map(p => ({...fila(p), sexo: p.sexo,
+      nacimiento: p.nacimiento ? p.nacimiento.split('-').reverse().join('/') : 'Sin dato',
+      edad: p.edad ?? '', dato: p.fuenteNac}));
+    const porEdad = new Map();
+    perfiles.forEach(p => {
+      const k = p.edad ?? 'Sin dato';
+      if(!porEdad.has(k)) porEdad.set(k, {edad: k, hombres:0, mujeres:0, otro:0, total:0});
+      const x = porEdad.get(k); x.total++;
+      if(p.sexo === 'HOMBRE') x.hombres++; else if(p.sexo === 'MUJER') x.mujeres++; else x.otro++;
+    });
+    const resumen = [...porEdad.values()].sort((x, y) => (typeof x.edad === 'number' ? x.edad : 999) - (typeof y.edad === 'number' ? y.edad : 999))
+      .map(x => ({...x, edad: typeof x.edad === 'number' ? `${x.edad} años` : x.edad}));
+    const fechaTxt = `${String(hoy.d).padStart(2,'0')}-${String(hoy.mo).padStart(2,'0')}-${hoy.y}`;
+    exportarLibro('edades' + sufijo, [
+      {nombre:`Edades al ${fechaTxt}`, columnas:['grupo','matricula','nombre','sexo','nacimiento','edad','dato'],
+       titulos:['Grupo','Matrícula','Nombre','Sexo','Fecha de nacimiento',`Edad al ${fechaTxt}`,'Dato tomado de'], filas: lista},
+      {nombre:'Resumen por edad', columnas:['edad','hombres','mujeres','otro','total'],
+       titulos:['Edad','Hombres','Mujeres','Otro / sin dato','Total'], filas: resumen}]);
+  });
   $$('#vista .filtroAcceso').forEach(b => b.addEventListener('click', () => {
     $('#fAcceso').value = b.dataset.a; $('#btnBuscar').click();
   }));
