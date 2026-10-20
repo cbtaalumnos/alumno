@@ -1900,31 +1900,33 @@ const CAMPOS_ALUMNO = [
 
 let filtroAlumnos = {grupo_id:'', busqueda:'', acceso:'', fechaEdad:''};
 
-/* Sexo y fecha de nacimiento: se usa lo que capturó el alumno en su portal
-   y, si falta, se toma de su CURP (posición 11 = H/M, posiciones 5-10 =
-   AAMMDD; el carácter 17 es número para nacidos antes de 2000 y letra
-   después). */
+/* Sexo y fecha de nacimiento: SIEMPRE de la CURP, que es el dato oficial
+   (posición 11 = H/M/X, posiciones 5-10 = AAMMDD; el carácter 17 es número
+   para nacidos antes de 2000 y letra después). Lo que capturó el alumno
+   solo se usa si su CURP no se puede leer, y así se indica. */
+function curpLegible(a){
+  return String(a.curp || '').toUpperCase().trim()
+    .match(/^[A-Z]{4}(\d{2})(\d{2})(\d{2})([HMX])[A-Z]{5}([0-9A-Z])/);
+}
 function sexoDe(a){
+  const m = curpLegible(a);
+  if(m) return {sexo: m[4] === 'H' ? 'HOMBRE' : m[4] === 'M' ? 'MUJER' : 'OTRO', fuente:'CURP'};
   const s = String(a.sexo || '').toUpperCase().trim();
-  if(s.startsWith('MASC') || s === 'H' || s === 'HOMBRE') return {sexo:'HOMBRE', fuente:'Capturado'};
-  if(s.startsWith('FEM')  || s === 'M' || s === 'MUJER')  return {sexo:'MUJER',  fuente:'Capturado'};
-  if(s === 'OTRO') return {sexo:'OTRO', fuente:'Capturado'};
-  const c = String(a.curp || '').toUpperCase().trim();
-  if(/^[A-Z]{4}\d{6}[HMX]/.test(c))
-    return {sexo: c[10] === 'H' ? 'HOMBRE' : c[10] === 'M' ? 'MUJER' : 'OTRO', fuente:'CURP'};
-  return {sexo:'SIN DATO', fuente:''};
+  if(s.startsWith('MASC')) return {sexo:'HOMBRE', fuente:'Capturado (CURP no legible)'};
+  if(s.startsWith('FEM'))  return {sexo:'MUJER',  fuente:'Capturado (CURP no legible)'};
+  if(s === 'OTRO')         return {sexo:'OTRO',   fuente:'Capturado (CURP no legible)'};
+  return {sexo:'SIN DATO', fuente:'CURP no legible'};
 }
 function nacimientoDe(a){
-  if(a.fecha_nacimiento) return {fecha: String(a.fecha_nacimiento).slice(0,10), fuente:'Capturada'};
-  const m = String(a.curp || '').toUpperCase().trim()
-    .match(/^[A-Z]{4}(\d{2})(\d{2})(\d{2})[HMX][A-Z]{5}([0-9A-Z])/);
+  const m = curpLegible(a);
   if(m){
-    const anio = (/\d/.test(m[4]) ? 1900 : 2000) + Number(m[1]);
+    const anio = (/\d/.test(m[5]) ? 1900 : 2000) + Number(m[1]);
     const f = `${anio}-${m[2]}-${m[3]}`;
     const d = new Date(f + 'T12:00:00');
-    if(!isNaN(d) && d.getMonth() + 1 === Number(m[2])) return {fecha: f, fuente:'CURP'};
+    if(!isNaN(d) && d.getMonth() + 1 === Number(m[2]) && d.getDate() === Number(m[3])) return {fecha: f, fuente:'CURP'};
   }
-  return {fecha:null, fuente:''};
+  if(a.fecha_nacimiento) return {fecha: String(a.fecha_nacimiento).slice(0,10), fuente:'Capturada (CURP no legible)'};
+  return {fecha:null, fuente:'CURP no legible'};
 }
 // Hoy en Quintana Roo
 function hoyLocal(){
@@ -2004,7 +2006,7 @@ async function verAlumnos(){
   const cuenta = s => perfiles.filter(p => p.sexo === s).length;
   const nH = cuenta('HOMBRE'), nM = cuenta('MUJER'), nO = cuenta('OTRO'), nS = cuenta('SIN DATO');
   const pct = n => perfiles.length ? Math.round(100 * n / perfiles.length) : 0;
-  const deCurp = perfiles.filter(p => p.fuenteSexo === 'CURP').length;
+  const sinCurp = perfiles.filter(p => p.fuenteSexo !== 'CURP' || p.fuenteNac !== 'CURP');
   const edades = perfiles.map(p => p.edad).filter(e => e !== null);
   const sexoPorGrupo = new Map();
   perfiles.forEach(p => {
@@ -2070,7 +2072,9 @@ async function verAlumnos(){
             ${edades.length ? `Edades al ${hoy.iso === hoyReal.iso ? 'día de hoy' : '<b style="color:var(--texto)">' + fechaCorte + '</b>'}: de <b style="color:var(--texto)">${Math.min(...edades)}</b> a
               <b style="color:var(--texto)">${Math.max(...edades)}</b> años ·
               promedio <b style="color:var(--texto)">${(edades.reduce((s, e) => s + e, 0) / edades.length).toFixed(1)}</b><br>` : ''}
-            ${deCurp ? `<span style="font-size:12px">${deCurp} tomado${deCurp === 1 ? '' : 's'} de la CURP porque el alumno aún no lo captura</span>` : ''}
+            <span style="font-size:12px">${sinCurp.length
+              ? `Datos tomados de la CURP. ${sinCurp.length} CURP no se pudo leer: ${escapar(sinCurp.slice(0,3).map(p => p.a.matricula).join(', '))}${sinCurp.length > 3 ? '…' : ''}`
+              : 'Sexo y edad tomados de la CURP de cada alumno'}</span>
           </div>
           ${!filtroAlumnos.grupo_id && sexoPorGrupo.size > 1 ? `
           <div style="flex:1;min-width:300px;display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:4px 22px;font-size:13px">
