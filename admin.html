@@ -787,17 +787,21 @@ async function verTablero(){
   if(alumnos.size) filas = filas.filter(f => alumnos.has(String(f.matricula)));
 
   // Asistencia por grupo (solo se registran inasistencias)
-  const diasCargados = rj.ok ? rj.datos.length : 0;
+  // Con la conexión al portal docente, los días salen de ahí y no del archivo
+  const remota = ra.ok && ra.fuente === 'portal_docente';
+  const diasCargados = remota ? (Number(ra.dias_clase) || 0) : (rj.ok ? rj.datos.length : 0);
   const faltasPorGrupo = new Map();
+  const diasPorGrupo = remota ? new Map() : null;
   for(const x of (ra.ok ? ra.datos : [])){
     const dias = Number(x.dias_registrados) || 0;
     if(!dias) continue;
     const perdidos = dias * (1 - (Number(x.porcentaje_asistencia) || 0) / 100);
     const k = claveGrupo(x.grupo);
     faltasPorGrupo.set(k, (faltasPorGrupo.get(k) || 0) + perdidos);
+    if(diasPorGrupo) diasPorGrupo.set(k, (diasPorGrupo.get(k) || 0) + dias);
   }
 
-  tableroDatos = {r, filas, alumnos, diasCargados, faltasPorGrupo,
+  tableroDatos = {r, filas, alumnos, diasCargados, faltasPorGrupo, diasPorGrupo,
                   umbral: Number(r.umbral_riesgo ?? 3)};
   pintarTablero();
 }
@@ -893,7 +897,7 @@ function estadisticaModo(modo){
 }
 
 function pintarTablero(){
-  const {r, diasCargados, faltasPorGrupo, umbral} = tableroDatos;
+  const {r, diasCargados, faltasPorGrupo, diasPorGrupo, umbral} = tableroDatos;
   const e = r.estadisticas || {};
   const modo = tableroModo;
   const est = estadisticaModo(modo);
@@ -914,6 +918,13 @@ function pintarTablero(){
   const colorPct = p => p >= 30 ? 'var(--rojo)' : p >= 15 ? 'var(--ambar)' : 'var(--verde)';
 
   const asistenciaDe = g => {
+    if(diasPorGrupo){
+      // Cada alumno con sus propios días de clase (portal docente)
+      const dias = diasPorGrupo.get(claveGrupo(g.grupo)) || 0;
+      if(!dias) return g.asistencia ?? null;
+      const perdidos = faltasPorGrupo.get(claveGrupo(g.grupo)) || 0;
+      return Math.max(0, Math.round(1000 * (1 - perdidos / dias)) / 10);
+    }
     if(!diasCargados || !g.alumnos) return g.asistencia ?? null;
     const perdidos = faltasPorGrupo.get(claveGrupo(g.grupo)) || 0;
     return Math.max(0, Math.round(1000 * (1 - perdidos / (g.alumnos * diasCargados))) / 10);
@@ -2425,14 +2436,19 @@ async function verFicha(id){
           ${par('Faltas', ra.faltas)}
           ${par('Justificadas', ra.justificadas)}
           ${par('Retardos', ra.retardos)}
-        </div>` : ''}
+          ${ra.pases ? par('Pases de salida', ra.pases) : ''}
+        </div>
+        ${r.fuente_asistencia === 'portal_docente' ? `<p style="font-size:12.5px;color:var(--texto-suave);margin:-4px 0 12px">
+          Asistencia del semestre tomada al momento del portal docente (Asistencia QR).</p>` : ''}` : ''}
       ${(r.inasistencias||[]).length ? `
         <div class="tabla-marco"><table class="datos" style="min-width:0">
           <thead><tr><th>Fecha</th><th>Estado</th></tr></thead>
           <tbody>${r.inasistencias.map(x => `<tr>
             <td>${fecha(x.fecha)}</td>
-            <td><span class="sello ${x.tipo === 'FALTA' ? 'cae' : x.tipo === 'RETARDO' ? 'ojo' : 'info'}">${
-              escapar(x.estado)}</span></td></tr>`).join('')}</tbody>
+            <td><span class="sello ${x.tipo === 'FALTA' ? 'cae' : x.tipo === 'RETARDO' ? 'ojo'
+              : x.tipo === 'ASISTENCIA' ? 'va' : 'info'}">${escapar(x.estado)}</span>
+              ${x.observaciones ? `<div style="color:var(--texto-suave);font-size:12px;margin-top:3px">${
+                escapar(x.observaciones)}</div>` : ''}</td></tr>`).join('')}</tbody>
         </table></div>`
         : `<div class="vacio"><p>${ra.dias_registrados
             ? 'Sin inasistencias en los días registrados.' : 'Todavía no se carga ningún día de asistencia.'}</p></div>`}
@@ -4478,6 +4494,7 @@ async function verAsistencia(){
   const res = await api('listar', {tabla:'v_resumen_inasistencias', orden:'alumno', limite:2000});
   const resumen = res.ok ? res.datos : [];
   const enRiesgo = resumen.filter(x => Number(x.porcentaje_asistencia) < 80 && x.dias_registrados > 0);
+  if(res.ok && res.fuente === 'portal_docente') return verAsistenciaConectada(res, enRiesgo, jornadas);
 
   // Registros individuales, para contar faltas y justificadas de cada día
   const registros = await traerInasistencias();
@@ -4584,6 +4601,100 @@ async function verAsistencia(){
     if(!r.ok){ alert(r.error); return; }
     irA('asistencia');
   });
+}
+
+/* Asistencia conectada con el portal docente (Asistencia QR). Ya no hay
+   que subir archivos: cada día se lee al momento. La carga manual queda
+   abajo, plegada, solo como respaldo si algún día falla la conexión. */
+function verAsistenciaConectada(res, enRiesgo, jornadas){
+  const dias = (res.dias || []).filter(d => Number(d.con_clase) > 0);
+  const n = v => Number(v) || 0;
+  $('#vista').innerHTML = `
+    <div class="recado bien" style="margin-top:0">
+      <b>Asistencia conectada con el portal docente.</b> Cada día con lista del semestre
+      (desde el ${fecha(res.periodo_desde)}) llega solo, al momento: asistencias con hora,
+      retardos, faltas, justificaciones y pases de salida. Ya no hace falta subir archivos.
+    </div>
+
+    <div class="medidores" style="margin-top:18px">
+      <div class="medidor"><div class="r">Días con lista</div>
+        <div class="v">${res.dias_clase ?? dias.length}</div>
+        <div class="n">en el semestre</div></div>
+      <div class="medidor ${enRiesgo.length ? 'alerta':'bien'}">
+        <div class="r">Bajo 80% de asistencia</div>
+        <div class="v">${enRiesgo.length}</div>
+        <div class="n">alumnos</div></div>
+      <div class="medidor"><div class="r">Alumnos con registro</div>
+        <div class="v">${(res.datos || []).length}</div></div>
+    </div>
+
+    ${enRiesgo.length ? `
+      <div class="tarjeta" style="margin-top:18px">
+        <h3>Alumnos con asistencia baja
+          <span class="der"><button class="boton tenue chico" id="btnExpAsist">Exportar a Excel</button></span></h3>
+        <div class="tabla-marco"><table class="datos">
+          <thead><tr><th>Alumno</th><th>Grupo</th><th class="n">Faltas</th>
+            <th class="n">Justificadas</th><th class="n">Retardos</th><th class="n">Asistencia</th></tr></thead>
+          <tbody>${enRiesgo.sort((a,b) => a.porcentaje_asistencia - b.porcentaje_asistencia)
+            .map(x => `<tr class="franja cae">
+              <td><b>${escapar(x.alumno)}</b>
+                <div style="color:var(--texto-suave);font-size:12px">${escapar(x.matricula)}</div></td>
+              <td>${escapar(x.grupo ?? '—')}</td>
+              <td class="n">${x.faltas}</td>
+              <td class="n">${x.justificadas}</td>
+              <td class="n">${x.retardos ?? 0}</td>
+              <td class="n"><span class="sello cae">${x.porcentaje_asistencia}%</span></td>
+            </tr>`).join('')}</tbody>
+        </table></div>
+      </div>` : ''}
+
+    <div class="tarjeta" style="margin-top:18px">
+      <h3>Días con lista <span style="font-weight:400;color:var(--texto-suave)">(${dias.length})</span>
+        <span class="der"><button class="boton tenue chico" id="btnExpTodos">Exportar todos los alumnos</button></span></h3>
+      ${dias.length ? `
+        <div class="tabla-marco"><table class="datos" style="min-width:0">
+          <thead><tr><th>Fecha</th><th class="n">Asistieron</th><th class="n">Retardos</th>
+            <th class="n">Faltas</th><th class="n">Justificadas</th><th class="n">Pases de salida</th></tr></thead>
+          <tbody>${dias.map(d => `<tr>
+            <td><b>${fecha(d.fecha)}</b></td>
+            <td class="n">${n(d.asistencias) + n(d.retardos)}</td>
+            <td class="n">${n(d.retardos) ? `<span class="sello ojo">${n(d.retardos)}</span>` : 0}</td>
+            <td class="n">${n(d.faltas) ? `<span class="sello cae">${n(d.faltas)}</span>` : 0}</td>
+            <td class="n">${n(d.justificadas) ? `<span class="sello info">${n(d.justificadas)}</span>` : 0}</td>
+            <td class="n">${n(d.pases) ? `<span class="sello espera">${n(d.pases)}</span>` : 0}</td>
+          </tr>`).join('')}</tbody>
+        </table></div>`
+        : '<div class="vacio"><div class="g">◧</div><p>Todavía no se ha pasado lista en este semestre.</p></div>'}
+    </div>
+
+    <details style="margin-top:18px">
+      <summary style="cursor:pointer;font-size:13.5px;color:var(--texto-suave)">
+        Carga manual con archivo (solo respaldo, si algún día falla la conexión)</summary>
+      <div class="tarjeta" style="margin-top:12px">
+        <h3>Subir asistencia</h3>
+        <div class="cuerpo">
+          <p style="font-size:13.5px;color:var(--texto-suave);max-width:68ch">
+            Mientras la conexión funcione, lo que se suba aquí no se muestra a los alumnos.
+            Ya hay ${jornadas.length} día(s) cargados con archivo.</p>
+          <div class="campo" style="margin-top:14px">
+            <label for="archAsist">Archivo</label>
+            <input id="archAsist" type="file" accept=".csv,.xlsx,.xls,.txt">
+            <p class="pista">Acepta CSV o Excel. Se lee en tu computadora.</p>
+          </div>
+          <div id="recadoAsist"></div>
+        </div>
+      </div>
+      <div id="previaAsist"></div>
+    </details>`;
+
+  $('#archAsist').addEventListener('change', leerAsistencia);
+  const be = $('#btnExpAsist');
+  if(be) be.addEventListener('click', () => exportarCSV('asistencia_baja', enRiesgo,
+    ['matricula','alumno','grupo','dias_registrados','faltas','retardos',
+     'justificadas','pases','porcentaje_asistencia']));
+  $('#btnExpTodos').addEventListener('click', () => exportarCSV('asistencia_alumnos', res.datos || [],
+    ['matricula','alumno','grupo','dias_registrados','asistencias','retardos','faltas',
+     'justificadas','pases','porcentaje_asistencia']));
 }
 
 /* Clasifica un registro de inasistencia: FALTA, JUSTIFICADA o RETARDO */
