@@ -796,8 +796,9 @@ async function tarjetaNotificaciones(){
   }
   return `<div class="activar-avisos" id="cajaAvisos"><div class="g">🔔</div><div>
     <h4>Entérate al momento</h4>
-    <p>Activa las notificaciones y te llegarán al teléfono los avisos de la escuela
-    y cuando tengas un reporte nuevo, aunque no tengas el portal abierto.</p>
+    <p>Activa las notificaciones y te llegarán al teléfono los avisos de la escuela,
+    tus reportes, la revisión de tus documentos y tu asistencia (faltas, retardos,
+    justificaciones y pases de salida), aunque no tengas el portal abierto.</p>
     <div class="acciones">
       <button class="boton chico" id="btnActivarAvisos">Activar notificaciones</button>
       ${eventoInstalar ? '<button class="boton tenue chico" id="btnInstalar">Instalar como app</button>' : ''}
@@ -836,7 +837,7 @@ function engancharTarjetaNotificaciones(){
       }
       await suscribir();
       $('#cajaAvisos').innerHTML = `<div class="g">✅</div><div><h4>¡Listo!</h4>
-        <p>Te avisaremos en este teléfono cuando haya un aviso o un reporte nuevo.</p></div>`;
+        <p>Te avisaremos en este teléfono de avisos, reportes, documentos y asistencia.</p></div>`;
       setTimeout(() => $('#cajaAvisos') && $('#cajaAvisos').remove(), 5000);
     } catch(e){
       // Los errores del navegador vienen en inglés; se explican en español
