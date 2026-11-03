@@ -825,7 +825,12 @@ function engancharTarjetaNotificaciones(){
     try {
       const permiso = await Notification.requestPermission();
       if(permiso !== 'granted'){
-        recado('#recadoAvisos', 'No se dio permiso. Puedes activarlo después desde aquí.', 'ojo');
+        // "default": el navegador ni siquiera mostró la pregunta (Chrome la
+        // esconde tras varios "ahora no"). "denied": está bloqueado en la
+        // página o en los ajustes del teléfono.
+        recado('#recadoAvisos', permiso === 'default'
+          ? 'El navegador no mostró la pregunta. Toca el ícono a la izquierda de la dirección de la página, entra a Permisos, cambia Notificaciones a «Permitir» y vuelve a tocar el botón.'
+          : 'Las notificaciones están bloqueadas. Toca el ícono a la izquierda de la dirección, entra a Permisos y activa Notificaciones. Si ya están permitidas ahí, revisa en los Ajustes del teléfono → Aplicaciones → Chrome → Notificaciones que estén activadas.', 'ojo');
         activar.disabled = false; activar.textContent = 'Activar notificaciones';
         return;
       }
