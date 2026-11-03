@@ -1465,8 +1465,125 @@ const SELLO_INASIST = {
   'Justificada (otra)':     'info'
 };
 
+/* Desde el portal docente llega cada día del semestre: asistencias con
+   su hora de entrada, retardos, faltas, justificaciones y pases de
+   salida. Si esa conexión no está activa, se muestra la asistencia
+   cargada a mano con archivo, como siempre. */
+const SITUACION_DIA = {
+  ASISTENCIA:  {sello:'va',   franja:'va'},
+  RETARDO:     {sello:'ojo',  franja:'riesgo'},
+  FALTA:       {sello:'cae',  franja:'cae'},
+  JUSTIFICADA: {sello:'info', franja:'espera'}
+};
+
 async function verAsistencia(){
   const r = await traer('asistencia', true);
+  if(r.fuente === 'portal_docente') return verAsistenciaDiaria(r);
+  return verAsistenciaArchivo(r);
+}
+
+function verAsistenciaDiaria(r){
+  const res = r.resumen || {};
+  const dias = r.detalle || [];
+  const hoy = new Date().toLocaleDateString('en-CA', {timeZone:'America/Cancun'});
+
+  if(!res.dias_registrados && !dias.length){
+    $('#vista').innerHTML = `<div class="tarjeta"><div class="vacio"><div class="g">◧</div>
+      <p>Todavía no se ha pasado lista en este semestre.</p></div></div>`;
+    return;
+  }
+
+  const filtros = [
+    ['todo',        'Todos los días', () => true],
+    ['FALTA',       'Faltas',         x => x.tipo === 'FALTA'],
+    ['RETARDO',     'Retardos',       x => x.tipo === 'RETARDO'],
+    ['JUSTIFICADA', 'Justificadas',   x => x.tipo === 'JUSTIFICADA'],
+    ['pase',        'Pases de salida', x => (x.pases || []).length > 0]
+  ].filter(([id,,f]) => id === 'todo' || dias.some(f));
+
+  const fila = x => {
+    const s = SITUACION_DIA[x.tipo] || {sello:'espera', franja:'espera'};
+    const notas = [];
+    if(x.manual) notas.push('Registro manual (sin credencial)');
+    if(x.tipo === 'JUSTIFICADA' && x.fecha > hoy) notas.push('Justificada por adelantado');
+    (x.pases || []).forEach(p => notas.push(
+      `<span class="sello espera">Pase de salida</span> salió a las <b>${escapar(p.hora ?? '')}</b>`
+      + (p.recoge ? ` · lo recogió ${escapar(p.recoge)}` : '')));
+    return `<tr class="franja ${s.franja}">
+      <td style="white-space:nowrap"><b>${fecha(x.fecha)}</b>
+        <div style="color:var(--texto-suave);font-size:12px;text-transform:capitalize">${
+          new Date(x.fecha + 'T12:00:00').toLocaleDateString('es-MX',{weekday:'long'})}</div></td>
+      <td><span class="sello ${s.sello}">${escapar(x.estado)}</span>
+        <div class="solo-movil">${x.hora ? `Entrada <b>${escapar(x.hora)}</b>` : ''}${
+          x.hora && notas.length ? '<br>' : ''}${notas.join('<br>')}</div></td>
+      <td class="n col-ent">${x.hora ? escapar(x.hora) : '—'}</td>
+      <td class="col-det" style="font-size:13px">${notas.join('<br>') || ''}</td>
+    </tr>`;
+  };
+
+  $('#vista').innerHTML = `
+    <style>
+      .asis-dia .solo-movil{display:none;font-size:12.5px;margin-top:5px;line-height:1.6}
+      .asis-dia .medidores{grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
+      .asis-dia .sub{margin:0;padding:12px 18px 0;font-size:13px;color:var(--texto-suave)}
+      .asis-dia .pestanas{margin:8px 18px 0}
+      @media (max-width:640px){
+        .asis-dia .col-ent,.asis-dia .col-det{display:none}
+        .asis-dia .solo-movil{display:block}
+        .asis-dia table.datos{min-width:0;width:100%}
+        .asis-dia td,.asis-dia th{white-space:normal !important}
+      }
+    </style>
+    <div class="asis-dia">
+    <div class="medidores" style="margin-top:0">
+      <div class="medidor ${res.porcentaje_asistencia !== null && Number(res.porcentaje_asistencia) < 80 ? 'alerta' : 'bien'}">
+        <div class="r">Asistencia</div>
+        <div class="v">${res.porcentaje_asistencia ?? '—'}${res.porcentaje_asistencia !== null && res.porcentaje_asistencia !== undefined ? '%' : ''}</div>
+        <div class="n">de ${res.dias_registrados ?? 0} días con clase</div></div>
+      <div class="medidor ${res.faltas ? 'alerta' : 'bien'}">
+        <div class="r">Faltas</div><div class="v">${res.faltas ?? 0}</div>
+        <div class="n">sin justificar</div></div>
+      <div class="medidor"><div class="r">Justificadas</div>
+        <div class="v">${res.justificadas ?? 0}</div></div>
+      <div class="medidor"><div class="r">Retardos</div>
+        <div class="v">${res.retardos ?? 0}</div></div>
+      ${res.pases ? `<div class="medidor"><div class="r">Pases de salida</div>
+        <div class="v">${res.pases}</div></div>` : ''}
+    </div>
+
+    <div class="tarjeta" style="margin-top:18px">
+      <h3>Mi asistencia del semestre</h3>
+      <p class="sub">Del ${fecha(r.desde)} a hoy. Se actualiza en cuanto se registra la asistencia en el plantel.</p>
+      ${filtros.length > 1 ? `<div class="pestanas" id="filtrosAsis">${filtros.map(([id,t], i) =>
+        `<button data-f="${id}" class="${i === 0 ? 'activo' : ''}">${t}</button>`).join('')}</div>` : ''}
+      <div class="tabla-marco">
+        <table class="datos">
+          <thead><tr><th>Fecha</th><th>Situación</th><th class="n col-ent">Entrada</th><th class="col-det">Detalle</th></tr></thead>
+          <tbody id="filasAsis">${dias.map(fila).join('')}</tbody>
+        </table>
+      </div>
+    </div>
+
+    <p style="margin-top:14px;font-size:13px;color:var(--texto-suave);max-width:70ch">
+      Cuenta como falta cada día en que tu grupo tuvo clase y no se registró tu asistencia.
+      Las faltas justificadas no bajan tu porcentaje. Si una falta debería estar justificada,
+      presenta tu comprobante en Control Escolar y se corrige aquí.
+    </p>
+    </div>`;
+
+  const marco = $('#filtrosAsis');
+  if(marco) marco.addEventListener('click', e => {
+    const b = e.target.closest('button[data-f]');
+    if(!b) return;
+    $$('#filtrosAsis button').forEach(x => x.classList.toggle('activo', x === b));
+    const f = (filtros.find(([id]) => id === b.dataset.f) || filtros[0])[2];
+    const lista = dias.filter(f);
+    $('#filasAsis').innerHTML = lista.length ? lista.map(fila).join('')
+      : `<tr><td colspan="4" style="text-align:center;color:var(--texto-suave)">Sin días en esta categoría.</td></tr>`;
+  });
+}
+
+function verAsistenciaArchivo(r){
   const res = r.resumen || {};
   const d = r.detalle || [];
 
