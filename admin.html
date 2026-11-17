@@ -464,6 +464,7 @@ async function abrirPanel(){
   irA('tablero');
   revisarPendientes();
   setInterval(revisarPendientes, 90 * 1000);
+  cargarEstadoCalif();
 }
 
 /* ==========================================================================
@@ -787,21 +788,17 @@ async function verTablero(){
   if(alumnos.size) filas = filas.filter(f => alumnos.has(String(f.matricula)));
 
   // Asistencia por grupo (solo se registran inasistencias)
-  // Con la conexión al portal docente, los días salen de ahí y no del archivo
-  const remota = ra.ok && ra.fuente === 'portal_docente';
-  const diasCargados = remota ? (Number(ra.dias_clase) || 0) : (rj.ok ? rj.datos.length : 0);
+  const diasCargados = rj.ok ? rj.datos.length : 0;
   const faltasPorGrupo = new Map();
-  const diasPorGrupo = remota ? new Map() : null;
   for(const x of (ra.ok ? ra.datos : [])){
     const dias = Number(x.dias_registrados) || 0;
     if(!dias) continue;
     const perdidos = dias * (1 - (Number(x.porcentaje_asistencia) || 0) / 100);
     const k = claveGrupo(x.grupo);
     faltasPorGrupo.set(k, (faltasPorGrupo.get(k) || 0) + perdidos);
-    if(diasPorGrupo) diasPorGrupo.set(k, (diasPorGrupo.get(k) || 0) + dias);
   }
 
-  tableroDatos = {r, filas, alumnos, diasCargados, faltasPorGrupo, diasPorGrupo,
+  tableroDatos = {r, filas, alumnos, diasCargados, faltasPorGrupo,
                   umbral: Number(r.umbral_riesgo ?? 3)};
   pintarTablero();
 }
@@ -897,7 +894,7 @@ function estadisticaModo(modo){
 }
 
 function pintarTablero(){
-  const {r, diasCargados, faltasPorGrupo, diasPorGrupo, umbral} = tableroDatos;
+  const {r, diasCargados, faltasPorGrupo, umbral} = tableroDatos;
   const e = r.estadisticas || {};
   const modo = tableroModo;
   const est = estadisticaModo(modo);
@@ -918,13 +915,6 @@ function pintarTablero(){
   const colorPct = p => p >= 30 ? 'var(--rojo)' : p >= 15 ? 'var(--ambar)' : 'var(--verde)';
 
   const asistenciaDe = g => {
-    if(diasPorGrupo){
-      // Cada alumno con sus propios días de clase (portal docente)
-      const dias = diasPorGrupo.get(claveGrupo(g.grupo)) || 0;
-      if(!dias) return g.asistencia ?? null;
-      const perdidos = faltasPorGrupo.get(claveGrupo(g.grupo)) || 0;
-      return Math.max(0, Math.round(1000 * (1 - perdidos / dias)) / 10);
-    }
     if(!diasCargados || !g.alumnos) return g.asistencia ?? null;
     const perdidos = faltasPorGrupo.get(claveGrupo(g.grupo)) || 0;
     return Math.max(0, Math.round(1000 * (1 - perdidos / (g.alumnos * diasCargados))) / 10);
@@ -2436,19 +2426,14 @@ async function verFicha(id){
           ${par('Faltas', ra.faltas)}
           ${par('Justificadas', ra.justificadas)}
           ${par('Retardos', ra.retardos)}
-          ${ra.pases ? par('Pases de salida', ra.pases) : ''}
-        </div>
-        ${r.fuente_asistencia === 'portal_docente' ? `<p style="font-size:12.5px;color:var(--texto-suave);margin:-4px 0 12px">
-          Asistencia del semestre tomada al momento del portal docente (Asistencia QR).</p>` : ''}` : ''}
+        </div>` : ''}
       ${(r.inasistencias||[]).length ? `
         <div class="tabla-marco"><table class="datos" style="min-width:0">
           <thead><tr><th>Fecha</th><th>Estado</th></tr></thead>
           <tbody>${r.inasistencias.map(x => `<tr>
             <td>${fecha(x.fecha)}</td>
-            <td><span class="sello ${x.tipo === 'FALTA' ? 'cae' : x.tipo === 'RETARDO' ? 'ojo'
-              : x.tipo === 'ASISTENCIA' ? 'va' : 'info'}">${escapar(x.estado)}</span>
-              ${x.observaciones ? `<div style="color:var(--texto-suave);font-size:12px;margin-top:3px">${
-                escapar(x.observaciones)}</div>` : ''}</td></tr>`).join('')}</tbody>
+            <td><span class="sello ${x.tipo === 'FALTA' ? 'cae' : x.tipo === 'RETARDO' ? 'ojo' : 'info'}">${
+              escapar(x.estado)}</span></td></tr>`).join('')}</tbody>
         </table></div>`
         : `<div class="vacio"><p>${ra.dias_registrados
             ? 'Sin inasistencias en los días registrados.' : 'Todavía no se carga ningún día de asistencia.'}</p></div>`}
@@ -4125,9 +4110,105 @@ function normTxt(t){
   return limpia(t).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toUpperCase();
 }
 
+/* ==========================================================================
+   CALIFICACIONES EN CAPTURA
+   Mientras están ocultas, el portal del alumno no recibe ninguna
+   calificación (lo impide el servidor) y le muestra un aviso. Todo lo demás
+   del portal sigue disponible. En el encabezado del panel queda un aviso
+   para no olvidar publicarlas.
+   ========================================================================== */
+const MENSAJE_CAPTURA = 'Estamos subiendo las calificaciones del parcial. En cuanto estén listas podrás consultarlas aquí.';
+let estadoCalif = {ocultas:false, mensaje: MENSAJE_CAPTURA};
+
+async function cargarEstadoCalif(){
+  const r = await api('listar', {tabla:'configuracion', filtros:{clave:'calificaciones_ocultas'}, limite:1});
+  if(r.ok && r.datos[0]){
+    try { estadoCalif = {...estadoCalif, ...JSON.parse(r.datos[0].valor)}; } catch(_) {}
+  }
+  pintarAvisoCalif();
+}
+
+function pintarAvisoCalif(){
+  document.getElementById('avisoCalif')?.remove();
+  if(!estadoCalif.ocultas) return;
+  const b = document.createElement('button');
+  b.id = 'avisoCalif';
+  b.title = 'Los alumnos no pueden ver sus calificaciones. Pulsa para publicarlas.';
+  b.textContent = '🔒 Calificaciones ocultas a los alumnos';
+  b.style.cssText = 'border:1px solid #E8C27A;background:#FDF3E2;color:#7A5312;border-radius:999px;'
+    + 'padding:5px 12px;font-size:12.5px;font-weight:650;cursor:pointer;white-space:nowrap';
+  if(esVisor){ b.style.cursor = 'default'; b.title = 'Los alumnos no pueden ver sus calificaciones por ahora.'; }
+  else b.addEventListener('click', () => irA('importar'));
+  const h2 = document.querySelector('.barra h2');
+  const ancla = document.querySelector('.barra .saludo-tema') || h2;
+  ancla.insertAdjacentElement('afterend', b);
+}
+
+function tarjetaVisibilidadCalif(){
+  const o = estadoCalif.ocultas;
+  return `
+    <div class="tarjeta" style="max-width:760px;margin-bottom:18px;border-left:4px solid ${o ? 'var(--ambar)' : 'var(--verde)'}">
+      <h3>${o ? '🔒 Las calificaciones están ocultas para los alumnos' : '👁 Los alumnos pueden ver sus calificaciones'}</h3>
+      <div class="cuerpo">
+        <p style="font-size:13.5px;color:var(--texto-suave);max-width:66ch">${o
+          ? 'Los alumnos ven todo su portal excepto sus calificaciones: en su lugar les aparece el mensaje de abajo. Cuando termines de subir y revisar, publícalas.'
+          : 'Antes de subir el archivo de un parcial puedes ocultarlas, para que los alumnos no vean calificaciones a medias. Verán todo lo demás de su portal.'}</p>
+        <div class="campo" style="margin-top:14px">
+          <label for="msgCaptura">Mensaje que verán los alumnos</label>
+          <textarea id="msgCaptura" rows="2" maxlength="300">${escapar(estadoCalif.mensaje || MENSAJE_CAPTURA)}</textarea>
+        </div>
+        ${o ? `<label style="display:flex;gap:8px;align-items:center;font-size:13.5px;margin:4px 0 14px">
+          <input type="checkbox" id="avisarPublicar" checked>
+          Al publicar, avisar a los alumnos con una notificación en su teléfono</label>` : ''}
+        <div style="display:flex;gap:10px;flex-wrap:wrap">
+          ${o ? `<button class="boton" id="btnPublicarCalif">Publicar calificaciones</button>
+                 <button class="boton tenue" id="btnGuardarMsg">Guardar mensaje</button>`
+              : `<button class="boton" id="btnOcultarCalif" style="background:#9A6B12">Ocultar calificaciones a los alumnos</button>`}
+        </div>
+        <div id="recadoVis"></div>
+      </div>
+    </div>`;
+}
+
+async function cambiarVisibilidadCalif(ocultas, avisar, alTerminar){
+  const mensaje = ($('#msgCaptura')?.value || estadoCalif.mensaje || MENSAJE_CAPTURA).trim();
+  const r = await api('calificaciones_visibilidad', {ocultas, mensaje, avisar});
+  if(!r.ok){ alert(r.error); return false; }
+  estadoCalif = {ocultas: r.ocultas, mensaje: r.mensaje};
+  pintarAvisoCalif();
+  if(alTerminar) alTerminar(r);
+  return true;
+}
+
+function engancharVisibilidadCalif(){
+  const oc = $('#btnOcultarCalif');
+  if(oc) oc.addEventListener('click', async () => {
+    oc.disabled = true;
+    if(await cambiarVisibilidadCalif(true, false)) verImportar();
+    else oc.disabled = false;
+  });
+  const pu = $('#btnPublicarCalif');
+  if(pu) pu.addEventListener('click', async () => {
+    pu.disabled = true; pu.textContent = 'Publicando…';
+    const ok = await cambiarVisibilidadCalif(false, $('#avisarPublicar')?.checked, r => {
+      verImportar();
+      setTimeout(() => recado('#recadoVis', `Publicadas. Los alumnos ya pueden ver sus calificaciones${
+        r.notificados ? ` · se avisó en ${r.notificados} teléfono${r.notificados === 1 ? '' : 's'}` : ''}.`, 'bien'), 50);
+    });
+    if(!ok){ pu.disabled = false; pu.textContent = 'Publicar calificaciones'; }
+  });
+  const gm = $('#btnGuardarMsg');
+  if(gm) gm.addEventListener('click', async () => {
+    gm.disabled = true;
+    if(await cambiarVisibilidadCalif(true, false)) recado('#recadoVis', 'Mensaje guardado.', 'bien');
+    gm.disabled = false;
+  });
+}
+
 function verImportar(){
   filasLeidas = null;
   $('#vista').innerHTML = `
+    ${tarjetaVisibilidadCalif()}
     <div class="tarjeta" style="max-width:760px">
       <h3>Importar archivo de calificaciones</h3>
       <div class="cuerpo">
@@ -4163,6 +4244,7 @@ function verImportar(){
     <div id="previa"></div>`;
 
   $('#archivo').addEventListener('change', leerArchivo);
+  engancharVisibilidadCalif();
 }
 
 /* El archivo puede llegar en tres formatos:
@@ -4457,8 +4539,23 @@ async function confirmarImportacion(e){
       ${(r.avisos||[]).length ? `<div style="margin-top:16px">
         ${r.avisos.map(a => `<div class="recado ojo" style="margin-top:8px">${escapar(a)}</div>`).join('')}
       </div>` : ''}
+
+      ${estadoCalif.ocultas ? `<div class="recado ojo" style="margin-top:18px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+        <span>🔒 Las calificaciones siguen <b>ocultas para los alumnos</b>. Revisa que todo esté bien y publícalas.</span>
+        <button class="boton chico" id="btnPublicarTrasImportar">Publicar calificaciones</button>
+      </div>` : ''}
       </div>
     </div>`;
+
+  const bp = $('#btnPublicarTrasImportar');
+  if(bp) bp.addEventListener('click', async () => {
+    bp.disabled = true; bp.textContent = 'Publicando…';
+    const ok = await cambiarVisibilidadCalif(false, true, r2 => {
+      bp.closest('.recado').outerHTML = `<div class="recado bien" style="margin-top:18px">Publicadas. Los alumnos ya pueden ver sus calificaciones${
+        r2.notificados ? ` · se avisó en ${r2.notificados} teléfono${r2.notificados === 1 ? '' : 's'}` : ''}.</div>`;
+    });
+    if(!ok){ bp.disabled = false; bp.textContent = 'Publicar calificaciones'; }
+  });
 
   await cargarLookups();
 }
@@ -4494,7 +4591,6 @@ async function verAsistencia(){
   const res = await api('listar', {tabla:'v_resumen_inasistencias', orden:'alumno', limite:2000});
   const resumen = res.ok ? res.datos : [];
   const enRiesgo = resumen.filter(x => Number(x.porcentaje_asistencia) < 80 && x.dias_registrados > 0);
-  if(res.ok && res.fuente === 'portal_docente') return verAsistenciaConectada(res, enRiesgo, jornadas);
 
   // Registros individuales, para contar faltas y justificadas de cada día
   const registros = await traerInasistencias();
@@ -4601,100 +4697,6 @@ async function verAsistencia(){
     if(!r.ok){ alert(r.error); return; }
     irA('asistencia');
   });
-}
-
-/* Asistencia conectada con el portal docente (Asistencia QR). Ya no hay
-   que subir archivos: cada día se lee al momento. La carga manual queda
-   abajo, plegada, solo como respaldo si algún día falla la conexión. */
-function verAsistenciaConectada(res, enRiesgo, jornadas){
-  const dias = (res.dias || []).filter(d => Number(d.con_clase) > 0);
-  const n = v => Number(v) || 0;
-  $('#vista').innerHTML = `
-    <div class="recado bien" style="margin-top:0">
-      <b>Asistencia conectada con el portal docente.</b> Cada día con lista del semestre
-      (desde el ${fecha(res.periodo_desde)}) llega solo, al momento: asistencias con hora,
-      retardos, faltas, justificaciones y pases de salida. Ya no hace falta subir archivos.
-    </div>
-
-    <div class="medidores" style="margin-top:18px">
-      <div class="medidor"><div class="r">Días con lista</div>
-        <div class="v">${res.dias_clase ?? dias.length}</div>
-        <div class="n">en el semestre</div></div>
-      <div class="medidor ${enRiesgo.length ? 'alerta':'bien'}">
-        <div class="r">Bajo 80% de asistencia</div>
-        <div class="v">${enRiesgo.length}</div>
-        <div class="n">alumnos</div></div>
-      <div class="medidor"><div class="r">Alumnos con registro</div>
-        <div class="v">${(res.datos || []).length}</div></div>
-    </div>
-
-    ${enRiesgo.length ? `
-      <div class="tarjeta" style="margin-top:18px">
-        <h3>Alumnos con asistencia baja
-          <span class="der"><button class="boton tenue chico" id="btnExpAsist">Exportar a Excel</button></span></h3>
-        <div class="tabla-marco"><table class="datos">
-          <thead><tr><th>Alumno</th><th>Grupo</th><th class="n">Faltas</th>
-            <th class="n">Justificadas</th><th class="n">Retardos</th><th class="n">Asistencia</th></tr></thead>
-          <tbody>${enRiesgo.sort((a,b) => a.porcentaje_asistencia - b.porcentaje_asistencia)
-            .map(x => `<tr class="franja cae">
-              <td><b>${escapar(x.alumno)}</b>
-                <div style="color:var(--texto-suave);font-size:12px">${escapar(x.matricula)}</div></td>
-              <td>${escapar(x.grupo ?? '—')}</td>
-              <td class="n">${x.faltas}</td>
-              <td class="n">${x.justificadas}</td>
-              <td class="n">${x.retardos ?? 0}</td>
-              <td class="n"><span class="sello cae">${x.porcentaje_asistencia}%</span></td>
-            </tr>`).join('')}</tbody>
-        </table></div>
-      </div>` : ''}
-
-    <div class="tarjeta" style="margin-top:18px">
-      <h3>Días con lista <span style="font-weight:400;color:var(--texto-suave)">(${dias.length})</span>
-        <span class="der"><button class="boton tenue chico" id="btnExpTodos">Exportar todos los alumnos</button></span></h3>
-      ${dias.length ? `
-        <div class="tabla-marco"><table class="datos" style="min-width:0">
-          <thead><tr><th>Fecha</th><th class="n">Asistieron</th><th class="n">Retardos</th>
-            <th class="n">Faltas</th><th class="n">Justificadas</th><th class="n">Pases de salida</th></tr></thead>
-          <tbody>${dias.map(d => `<tr>
-            <td><b>${fecha(d.fecha)}</b></td>
-            <td class="n">${n(d.asistencias) + n(d.retardos)}</td>
-            <td class="n">${n(d.retardos) ? `<span class="sello ojo">${n(d.retardos)}</span>` : 0}</td>
-            <td class="n">${n(d.faltas) ? `<span class="sello cae">${n(d.faltas)}</span>` : 0}</td>
-            <td class="n">${n(d.justificadas) ? `<span class="sello info">${n(d.justificadas)}</span>` : 0}</td>
-            <td class="n">${n(d.pases) ? `<span class="sello espera">${n(d.pases)}</span>` : 0}</td>
-          </tr>`).join('')}</tbody>
-        </table></div>`
-        : '<div class="vacio"><div class="g">◧</div><p>Todavía no se ha pasado lista en este semestre.</p></div>'}
-    </div>
-
-    <details style="margin-top:18px">
-      <summary style="cursor:pointer;font-size:13.5px;color:var(--texto-suave)">
-        Carga manual con archivo (solo respaldo, si algún día falla la conexión)</summary>
-      <div class="tarjeta" style="margin-top:12px">
-        <h3>Subir asistencia</h3>
-        <div class="cuerpo">
-          <p style="font-size:13.5px;color:var(--texto-suave);max-width:68ch">
-            Mientras la conexión funcione, lo que se suba aquí no se muestra a los alumnos.
-            Ya hay ${jornadas.length} día(s) cargados con archivo.</p>
-          <div class="campo" style="margin-top:14px">
-            <label for="archAsist">Archivo</label>
-            <input id="archAsist" type="file" accept=".csv,.xlsx,.xls,.txt">
-            <p class="pista">Acepta CSV o Excel. Se lee en tu computadora.</p>
-          </div>
-          <div id="recadoAsist"></div>
-        </div>
-      </div>
-      <div id="previaAsist"></div>
-    </details>`;
-
-  $('#archAsist').addEventListener('change', leerAsistencia);
-  const be = $('#btnExpAsist');
-  if(be) be.addEventListener('click', () => exportarCSV('asistencia_baja', enRiesgo,
-    ['matricula','alumno','grupo','dias_registrados','faltas','retardos',
-     'justificadas','pases','porcentaje_asistencia']));
-  $('#btnExpTodos').addEventListener('click', () => exportarCSV('asistencia_alumnos', res.datos || [],
-    ['matricula','alumno','grupo','dias_registrados','asistencias','retardos','faltas',
-     'justificadas','pases','porcentaje_asistencia']));
 }
 
 /* Clasifica un registro de inasistencia: FALTA, JUSTIFICADA o RETARDO */

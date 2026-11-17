@@ -796,9 +796,8 @@ async function tarjetaNotificaciones(){
   }
   return `<div class="activar-avisos" id="cajaAvisos"><div class="g">🔔</div><div>
     <h4>Entérate al momento</h4>
-    <p>Activa las notificaciones y te llegarán al teléfono los avisos de la escuela,
-    tus reportes, la revisión de tus documentos y tu asistencia (faltas, retardos,
-    justificaciones y pases de salida), aunque no tengas el portal abierto.</p>
+    <p>Activa las notificaciones y te llegarán al teléfono los avisos de la escuela
+    y cuando tengas un reporte nuevo, aunque no tengas el portal abierto.</p>
     <div class="acciones">
       <button class="boton chico" id="btnActivarAvisos">Activar notificaciones</button>
       ${eventoInstalar ? '<button class="boton tenue chico" id="btnInstalar">Instalar como app</button>' : ''}
@@ -826,18 +825,13 @@ function engancharTarjetaNotificaciones(){
     try {
       const permiso = await Notification.requestPermission();
       if(permiso !== 'granted'){
-        // "default": el navegador ni siquiera mostró la pregunta (Chrome la
-        // esconde tras varios "ahora no"). "denied": está bloqueado en la
-        // página o en los ajustes del teléfono.
-        recado('#recadoAvisos', permiso === 'default'
-          ? 'El navegador no mostró la pregunta. Toca el ícono a la izquierda de la dirección de la página, entra a Permisos, cambia Notificaciones a «Permitir» y vuelve a tocar el botón.'
-          : 'Las notificaciones están bloqueadas. Toca el ícono a la izquierda de la dirección, entra a Permisos y activa Notificaciones. Si ya están permitidas ahí, revisa en los Ajustes del teléfono → Aplicaciones → Chrome → Notificaciones que estén activadas.', 'ojo');
+        recado('#recadoAvisos', 'No se dio permiso. Puedes activarlo después desde aquí.', 'ojo');
         activar.disabled = false; activar.textContent = 'Activar notificaciones';
         return;
       }
       await suscribir();
       $('#cajaAvisos').innerHTML = `<div class="g">✅</div><div><h4>¡Listo!</h4>
-        <p>Te avisaremos en este teléfono de avisos, reportes, documentos y asistencia.</p></div>`;
+        <p>Te avisaremos en este teléfono cuando haya un aviso o un reporte nuevo.</p></div>`;
       setTimeout(() => $('#cajaAvisos') && $('#cajaAvisos').remove(), 5000);
     } catch(e){
       // Los errores del navegador vienen en inglés; se explican en español
@@ -954,6 +948,7 @@ async function verInicio(){
     traer('documentos', true), traer('avisos')
   ]);
 
+  const enCaptura = !!calif.en_captura;
   const notas = cuentanPromedio(calif.calificaciones)
     .map(c => c.calificacion_final)
     .filter(v => v !== null && v !== undefined);
@@ -990,6 +985,12 @@ async function verInicio(){
     ${fichaHTML(perfil)}
 
     <div class="medidores">
+      ${enCaptura ? `
+      <div class="medidor" style="grid-column:span 2">
+        <div class="r">Calificaciones</div>
+        <div class="v" style="font-size:22px">🔒 En captura</div>
+        <div class="n">${escapar(calif.mensaje)}</div>
+      </div>` : `
       <div class="medidor ${promedio && promedio >= 8 ? 'bien' : ''}">
         <div class="r">Promedio del periodo</div>
         <div class="v">${promedio ?? '—'}</div>
@@ -999,7 +1000,7 @@ async function verInicio(){
         <div class="r">Materias en riesgo</div>
         <div class="v">${reprobadas}</div>
         <div class="n">${reprobadas ? 'Acércate con tu docente' : 'Vas al corriente'}</div>
-      </div>
+      </div>`}
       <div class="medidor ${porcAsis !== null && porcAsis < 80 ? 'alerta'
                           : (porcAsis === 100 && !detalleAsis.length ? 'bien' : '')}">
         <div class="r">Asistencia</div>
@@ -1372,8 +1373,18 @@ function descargarImagen(dataUrl){
 
 /* ---- Calificaciones ------------------------------------------------------ */
 async function verCalificaciones(){
-  const r = await traer('calificaciones');
+  const r = await traer('calificaciones', true);
   const c = r.calificaciones;
+
+  if(r.en_captura){
+    $('#vista').innerHTML = `<div class="tarjeta"><div class="vacio" style="padding:46px 20px">
+      <div class="g" style="font-size:42px">🔒</div>
+      <p style="font-size:17px;font-weight:700;color:var(--texto);margin-bottom:8px">Calificaciones en captura</p>
+      <p style="max-width:52ch;margin:0 auto">${escapar(r.mensaje)}</p>
+      <p style="font-size:12.5px;margin-top:14px">Mientras tanto puedes consultar tu horario, asistencia, documentos, reportes y avisos.</p>
+    </div></div>`;
+    return;
+  }
 
   if(!c.length){
     $('#vista').innerHTML = '<div class="tarjeta"><div class="vacio"><div class="g">▦</div><p>Aún no hay calificaciones capturadas para este periodo.</p></div></div>';
@@ -1471,125 +1482,8 @@ const SELLO_INASIST = {
   'Justificada (otra)':     'info'
 };
 
-/* Desde el portal docente llega cada día del semestre: asistencias con
-   su hora de entrada, retardos, faltas, justificaciones y pases de
-   salida. Si esa conexión no está activa, se muestra la asistencia
-   cargada a mano con archivo, como siempre. */
-const SITUACION_DIA = {
-  ASISTENCIA:  {sello:'va',   franja:'va'},
-  RETARDO:     {sello:'ojo',  franja:'riesgo'},
-  FALTA:       {sello:'cae',  franja:'cae'},
-  JUSTIFICADA: {sello:'info', franja:'espera'}
-};
-
 async function verAsistencia(){
   const r = await traer('asistencia', true);
-  if(r.fuente === 'portal_docente') return verAsistenciaDiaria(r);
-  return verAsistenciaArchivo(r);
-}
-
-function verAsistenciaDiaria(r){
-  const res = r.resumen || {};
-  const dias = r.detalle || [];
-  const hoy = new Date().toLocaleDateString('en-CA', {timeZone:'America/Cancun'});
-
-  if(!res.dias_registrados && !dias.length){
-    $('#vista').innerHTML = `<div class="tarjeta"><div class="vacio"><div class="g">◧</div>
-      <p>Todavía no se ha pasado lista en este semestre.</p></div></div>`;
-    return;
-  }
-
-  const filtros = [
-    ['todo',        'Todos los días', () => true],
-    ['FALTA',       'Faltas',         x => x.tipo === 'FALTA'],
-    ['RETARDO',     'Retardos',       x => x.tipo === 'RETARDO'],
-    ['JUSTIFICADA', 'Justificadas',   x => x.tipo === 'JUSTIFICADA'],
-    ['pase',        'Pases de salida', x => (x.pases || []).length > 0]
-  ].filter(([id,,f]) => id === 'todo' || dias.some(f));
-
-  const fila = x => {
-    const s = SITUACION_DIA[x.tipo] || {sello:'espera', franja:'espera'};
-    const notas = [];
-    if(x.manual) notas.push('Registro manual (sin credencial)');
-    if(x.tipo === 'JUSTIFICADA' && x.fecha > hoy) notas.push('Justificada por adelantado');
-    (x.pases || []).forEach(p => notas.push(
-      `<span class="sello espera">Pase de salida</span> salió a las <b>${escapar(p.hora ?? '')}</b>`
-      + (p.recoge ? ` · lo recogió ${escapar(p.recoge)}` : '')));
-    return `<tr class="franja ${s.franja}">
-      <td style="white-space:nowrap"><b>${fecha(x.fecha)}</b>
-        <div style="color:var(--texto-suave);font-size:12px;text-transform:capitalize">${
-          new Date(x.fecha + 'T12:00:00').toLocaleDateString('es-MX',{weekday:'long'})}</div></td>
-      <td><span class="sello ${s.sello}">${escapar(x.estado)}</span>
-        <div class="solo-movil">${x.hora ? `Entrada <b>${escapar(x.hora)}</b>` : ''}${
-          x.hora && notas.length ? '<br>' : ''}${notas.join('<br>')}</div></td>
-      <td class="n col-ent">${x.hora ? escapar(x.hora) : '—'}</td>
-      <td class="col-det" style="font-size:13px">${notas.join('<br>') || ''}</td>
-    </tr>`;
-  };
-
-  $('#vista').innerHTML = `
-    <style>
-      .asis-dia .solo-movil{display:none;font-size:12.5px;margin-top:5px;line-height:1.6}
-      .asis-dia .medidores{grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
-      .asis-dia .sub{margin:0;padding:12px 18px 0;font-size:13px;color:var(--texto-suave)}
-      .asis-dia .pestanas{margin:8px 18px 0}
-      @media (max-width:640px){
-        .asis-dia .col-ent,.asis-dia .col-det{display:none}
-        .asis-dia .solo-movil{display:block}
-        .asis-dia table.datos{min-width:0;width:100%}
-        .asis-dia td,.asis-dia th{white-space:normal !important}
-      }
-    </style>
-    <div class="asis-dia">
-    <div class="medidores" style="margin-top:0">
-      <div class="medidor ${res.porcentaje_asistencia !== null && Number(res.porcentaje_asistencia) < 80 ? 'alerta' : 'bien'}">
-        <div class="r">Asistencia</div>
-        <div class="v">${res.porcentaje_asistencia ?? '—'}${res.porcentaje_asistencia !== null && res.porcentaje_asistencia !== undefined ? '%' : ''}</div>
-        <div class="n">de ${res.dias_registrados ?? 0} días con clase</div></div>
-      <div class="medidor ${res.faltas ? 'alerta' : 'bien'}">
-        <div class="r">Faltas</div><div class="v">${res.faltas ?? 0}</div>
-        <div class="n">sin justificar</div></div>
-      <div class="medidor"><div class="r">Justificadas</div>
-        <div class="v">${res.justificadas ?? 0}</div></div>
-      <div class="medidor"><div class="r">Retardos</div>
-        <div class="v">${res.retardos ?? 0}</div></div>
-      ${res.pases ? `<div class="medidor"><div class="r">Pases de salida</div>
-        <div class="v">${res.pases}</div></div>` : ''}
-    </div>
-
-    <div class="tarjeta" style="margin-top:18px">
-      <h3>Mi asistencia del semestre</h3>
-      <p class="sub">Del ${fecha(r.desde)} a hoy. Se actualiza en cuanto se registra la asistencia en el plantel.</p>
-      ${filtros.length > 1 ? `<div class="pestanas" id="filtrosAsis">${filtros.map(([id,t], i) =>
-        `<button data-f="${id}" class="${i === 0 ? 'activo' : ''}">${t}</button>`).join('')}</div>` : ''}
-      <div class="tabla-marco">
-        <table class="datos">
-          <thead><tr><th>Fecha</th><th>Situación</th><th class="n col-ent">Entrada</th><th class="col-det">Detalle</th></tr></thead>
-          <tbody id="filasAsis">${dias.map(fila).join('')}</tbody>
-        </table>
-      </div>
-    </div>
-
-    <p style="margin-top:14px;font-size:13px;color:var(--texto-suave);max-width:70ch">
-      Cuenta como falta cada día en que tu grupo tuvo clase y no se registró tu asistencia.
-      Las faltas justificadas no bajan tu porcentaje. Si una falta debería estar justificada,
-      presenta tu comprobante en Control Escolar y se corrige aquí.
-    </p>
-    </div>`;
-
-  const marco = $('#filtrosAsis');
-  if(marco) marco.addEventListener('click', e => {
-    const b = e.target.closest('button[data-f]');
-    if(!b) return;
-    $$('#filtrosAsis button').forEach(x => x.classList.toggle('activo', x === b));
-    const f = (filtros.find(([id]) => id === b.dataset.f) || filtros[0])[2];
-    const lista = dias.filter(f);
-    $('#filasAsis').innerHTML = lista.length ? lista.map(fila).join('')
-      : `<tr><td colspan="4" style="text-align:center;color:var(--texto-suave)">Sin días en esta categoría.</td></tr>`;
-  });
-}
-
-function verAsistenciaArchivo(r){
   const res = r.resumen || {};
   const d = r.detalle || [];
 
