@@ -4066,6 +4066,10 @@ const OBLIGATORIAS = ['CARRERA','SEMESTRE','GRUPO','NO CONTROL','NOMBRE',
                       'PATERNO','CURP','NOMBRE ASIGNATURA','PERIODO'];
 
 let filasLeidas = null, nombreArchivo = '';
+// «Solo actualizar alumnos que ya están en el portal»: el archivo de la SEP
+// trae a veces alumnos que no deben entrar (otros grupos, recursadores de
+// generaciones antiguas). Con la casilla activa se omiten, sin editar el Excel.
+let soloExistentes = true, filasArchivo = null;
 
 const CP1252_ALTO = {
   0x80:'€',0x82:'‚',0x83:'ƒ',0x84:'„',0x85:'…',0x86:'†',0x87:'‡',0x88:'ˆ',
@@ -4238,12 +4242,23 @@ function verImportar(){
           <p class="pista">El periodo activo es el que ven los alumnos en su portal.</p>
         </div>
 
+        <label style="display:flex;gap:10px;align-items:flex-start;margin:4px 0 6px;font-size:14px;cursor:pointer">
+          <input type="checkbox" id="soloExistentes" ${soloExistentes ? 'checked' : ''} style="margin-top:3px">
+          <span><b>Solo actualizar alumnos que ya están en el portal</b><br>
+            <span style="font-size:12.5px;color:var(--texto-suave)">Los alumnos del archivo que no estén registrados
+            se omiten y no se crean. Desmárcala al inicio de semestre, cuando sí entran alumnos nuevos.</span></span>
+        </label>
+
         <div id="recadoImp"></div>
       </div>
     </div>
     <div id="previa"></div>`;
 
   $('#archivo').addEventListener('change', leerArchivo);
+  $('#soloExistentes').addEventListener('change', ev => {
+    soloExistentes = ev.target.checked;
+    if(filasArchivo) prepararPrevia(filasArchivo);
+  });
   engancharVisibilidadCalif();
 }
 
@@ -4346,9 +4361,35 @@ function armarFilas(matriz){
 
   if(!filas.length){ recado('#recadoImp','No se encontró ninguna fila con datos.'); return; }
 
-  filasLeidas = filas;
+  filasArchivo = filas;
   recado('#recadoImp','');
-  mostrarPrevia(filas);
+  prepararPrevia(filas);
+}
+
+/* Aplica la casilla «solo alumnos que ya están en el portal» y arma la previa */
+async function prepararPrevia(filas){
+  let omitidos = [];
+  filasLeidas = filas;
+  if(soloExistentes){
+    recado('#recadoImp', 'Comparando con los alumnos del portal…', 'ojo');
+    const r = await api('listar', {tabla:'alumnos', columnas:'matricula', limite:2000});
+    if(!r.ok){ recado('#recadoImp', r.error); return; }
+    const registradas = new Set(r.datos.map(a => String(a.matricula).trim().toUpperCase()));
+    filasLeidas = filas.filter(f => registradas.has(String(f.no_control).trim().toUpperCase()));
+    const fuera = new Map();
+    filas.forEach(f => {
+      const m = String(f.no_control).trim().toUpperCase();
+      if(!registradas.has(m) && !fuera.has(m)) fuera.set(m, f);
+    });
+    omitidos = [...fuera.values()];
+    recado('#recadoImp', '');
+    if(!filasLeidas.length){
+      $('#previa').innerHTML = '';
+      recado('#recadoImp', 'Ningún alumno del archivo está registrado en el portal. Si es inicio de semestre, desmarca la casilla «Solo actualizar alumnos que ya están en el portal».');
+      return;
+    }
+  }
+  mostrarPrevia(filasLeidas, omitidos);
 }
 
 /* Tabla HTML disfrazada de .xls, que es lo que exporta la SEP */
@@ -4373,7 +4414,7 @@ function letraDeGrupo(carrera, letraExcel){
   return (letraExcel || 'A').toUpperCase();
 }
 
-function mostrarPrevia(filas){
+function mostrarPrevia(filas, omitidos = []){
   const alumnos  = new Set(filas.map(f => f.no_control));
   const materias = new Set(filas.map(f => normTxt(f.asignatura) + '|' + f.semestre));
   const carreras = new Set(filas.map(f => normTxt(f.carrera)));
@@ -4416,6 +4457,25 @@ function mostrarPrevia(filas){
       <div class="medidor"><div class="r">Grupos</div><div class="v">${Object.keys(grupos).length}</div></div>
       <div class="medidor ${conCalif ? 'bien':''}"><div class="r">Con calificación</div><div class="v">${conCalif}</div></div>
     </div>
+
+    ${omitidos.length ? `<div class="tarjeta" style="margin-top:18px;border-left:4px solid var(--ambar)">
+      <h3>Se omitirán ${omitidos.length} alumno${omitidos.length === 1 ? '' : 's'} que no están en el portal
+        <span class="der"><button class="boton tenue chico" id="btnExpOmitidos">Exportar a Excel</button></span></h3>
+      <div class="cuerpo">
+        <p style="font-size:13.5px;color:var(--texto-suave);max-width:70ch;margin-bottom:12px">
+          No se crearán ni se les cargarán calificaciones. Los alumnos que ya están en el portal se actualizan
+          normalmente, con todas sus materias (incluidos los módulos).</p>
+        <details><summary style="cursor:pointer;font-size:13px;color:var(--verde)">Ver quiénes son</summary>
+          <div class="tabla-marco" style="margin-top:10px"><table class="datos" style="min-width:0">
+            <thead><tr><th>Matrícula</th><th>Alumno</th><th>Grupo en el archivo</th><th>Carrera</th><th>Generación</th></tr></thead>
+            <tbody>${omitidos.map(f => `<tr><td>${escapar(f.no_control)}</td>
+              <td>${escapar(`${f.paterno ?? ''} ${f.materno ?? ''} ${f.nombres ?? ''}`.replace(/\s+/g,' ').trim())}</td>
+              <td>${escapar(f.grupo)}</td><td style="font-size:12.5px">${escapar(f.carrera)}</td>
+              <td style="font-size:12.5px">${escapar(f.generacion ?? '')}</td></tr>`).join('')}</tbody>
+          </table></div>
+        </details>
+      </div>
+    </div>` : ''}
 
     <div class="tarjeta" style="margin-top:18px">
       <h3>Así quedarán los grupos</h3>
@@ -4468,6 +4528,12 @@ function mostrarPrevia(filas){
 
   $('#btnCancelar').addEventListener('click', () => irA('importar'));
   $('#btnConfirmar').addEventListener('click', confirmarImportacion);
+  const bo = $('#btnExpOmitidos');
+  if(bo) bo.addEventListener('click', () => exportarCSV('alumnos_omitidos', omitidos.map(f => ({
+    matricula: f.no_control,
+    alumno: `${f.paterno ?? ''} ${f.materno ?? ''} ${f.nombres ?? ''}`.replace(/\s+/g,' ').trim(),
+    grupo_archivo: f.grupo, carrera: f.carrera, generacion: f.generacion ?? ''})),
+    ['matricula','alumno','grupo_archivo','carrera','generacion']));
 }
 
 async function confirmarImportacion(e){
@@ -4479,6 +4545,7 @@ async function confirmarImportacion(e){
     token: sesion.token,
     archivo: nombreArchivo,
     activar_periodo: $('#activarPeriodo').value === 'si',
+    solo_existentes: soloExistentes,
     filas: filasLeidas
   });
 
@@ -4498,6 +4565,7 @@ async function confirmarImportacion(e){
       <h3>Resultado</h3>
       <div class="cuerpo"><div class="pares">
         <div class="par"><span>Alumnos nuevos</span><b>${s.alumnos}</b></div>
+        ${s.alumnos_omitidos ? `<div class="par"><span>Alumnos omitidos (no están en el portal)</span><b>${s.alumnos_omitidos}</b></div>` : ''}
         <div class="par"><span>Alumnos actualizados</span><b>${s.alumnos_actualizados ?? 0}</b></div>
         <div class="par"><span>Grupos creados</span><b>${s.grupos}</b></div>
         <div class="par"><span>Carreras creadas</span><b>${s.carreras}</b></div>
