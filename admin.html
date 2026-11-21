@@ -1349,8 +1349,11 @@ function textoDiploma(d){
   const sem = DIPLOMA.ordinal[Number(d.semestre)];
   const prom = Number(d.promedio).toFixed(2);
   const carrera = nombreCarrera(d.carrera);
-  // "...en el segundo parcial del tercer semestre de la especialidad de Técnico Agropecuario."
-  const donde = (sem ? ` del ${sem} semestre` : '') + (carrera ? ` de la especialidad de ${carrera}` : '');
+  // 1.er semestre: sin especialidad, es el Componente Básico y Propedéutico.
+  // Los demás: "...del tercer semestre de la especialidad de Técnico Agropecuario."
+  const area = Number(d.semestre) === 1 ? ', correspondiente al Componente Básico y Propedéutico'
+             : carrera ? ` de la especialidad de ${carrera}` : '';
+  const donde = (sem ? ` del ${sem} semestre` : '') + area;
   const logro = d.parcial
     ? `Por haber obtenido un promedio de ${prom} en el ${d.parcial} parcial${donde}.`
     : `Por haber obtenido un promedio general de ${prom}${donde ? ' en el' + donde.replace(/^ del/, '') : ''}.`;
