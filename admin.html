@@ -764,7 +764,7 @@ async function verTablero(){
     api('listar', {tabla:'jornadas', orden:'fecha', limite:400}),
     api('listar', {tabla:'v_resumen_inasistencias', orden:'alumno', limite:2000}),
     api('listar', {tabla:'alumnos',
-      columnas:'id,matricula,apellido_paterno,apellido_materno,nombres,grupo_id,activo,estatus', limite:3000}),
+      columnas:'id,matricula,apellido_paterno,apellido_materno,nombres,grupo_id,carrera_id,activo,estatus', limite:3000}),
     traerTodo('v_calificaciones', 'id')
   ]);
   if(!r.ok) throw new Error(r.error);
@@ -826,6 +826,7 @@ function estadisticaModo(modo){
                  : (c.alumno ?? mat),
       orden: al || {apellido_paterno: c.alumno ?? ''},
       grupoObj: grupo,
+      carrera: (buscaEn('carreras', al?.carrera_id ?? grupo?.carrera_id) || {}).nombre || '',
       grupo: grupo ? nombreGrupo(grupo) : (c.grupo ?? '—'),
       semestre: grupo?.semestre ?? c.semestre ?? '',
       inscritas: 0, calificadas: 0, suma: 0, reprobadas: []
@@ -1139,12 +1140,13 @@ function pintarTablero(){
     <div class="tarjeta">
       <h3>Primeros lugares
         <span style="font-weight:400;color:var(--texto-suave)">(${est.mejores.length}) · ${etiquetaModo}</span>
-        <span class="der"><button class="boton tenue chico" id="btnExpMejores">Exportar a Excel</button></span></h3>
+        <span class="der"><button class="boton chico" id="btnDiplomasTodos">Descargar todos los diplomas</button>
+          <button class="boton tenue chico" id="btnExpMejores">Exportar a Excel</button></span></h3>
       <div class="cuerpo">
         <p style="font-size:13px;color:var(--texto-suave);max-width:70ch;margin-bottom:16px">
           Cuando hay empate en el primer lugar, aparecen todos los que lo comparten.
         </p>
-        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:12px">
+        <div id="cajaMejores" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:12px">
           ${Object.values(est.mejores.reduce((acc, x) => {
               (acc[x.grupo] = acc[x.grupo] || []).push(x); return acc;
             }, {})).sort((a,b) => a[0].grupoObj && b[0].grupoObj
@@ -1155,10 +1157,12 @@ function pintarTablero(){
                 <b style="font-size:15px">${escapar(lista[0].grupo)}</b>
                 <span class="sello va" style="margin-left:auto">${lista[0].promedio}</span>
               </div>
-              ${lista.map(a => `<div style="font-size:13.5px;padding:3px 0">
-                ${escapar(a.alumno)}
+              ${lista.map(a => `<div style="font-size:13.5px;padding:3px 0;display:flex;gap:8px;align-items:flex-start">
+                <div style="flex:1">${escapar(a.alumno)}
                 <div style="color:var(--texto-suave);font-size:12px">${escapar(a.matricula)} · ${
-                  a.calificadas} materias</div></div>`).join('')}
+                  a.calificadas} materias</div></div>
+                <button class="boton tenue chico btnDiploma" data-mat="${escapar(a.matricula)}"
+                  title="Descargar el diploma de este alumno">Diploma</button></div>`).join('')}
               ${lista.length > 1 ? `<div style="margin-top:8px;font-size:12px;color:var(--texto-suave)">
                 ${lista.length} alumnos empatados</div>` : ''}
             </div>`).join('')}
@@ -1238,6 +1242,19 @@ function pintarTablero(){
     abrirDetalleDocente(est.porDocente[Number(a.dataset.i)], etiquetaModo, sufijo);
   });
 
+  // Diplomas: uno por alumno o todos en un solo PDF (una hoja por alumno)
+  const ordenMejores = () => [...est.mejores].sort((a,b) =>
+    (a.grupoObj && b.grupoObj ? ORDENES.grupos(a.grupoObj, b.grupoObj) : cmp(a.grupo, b.grupo)) || cmp(a.alumno, b.alumno));
+  const bdt = $('#btnDiplomasTodos');
+  if(bdt) bdt.addEventListener('click', () => descargarDiplomas(ordenMejores(), modo,
+    `Diplomas mejores promedios - ${MODOS_TABLERO[modo].corto}`, bdt));
+  const cm = $('#cajaMejores');
+  if(cm) cm.addEventListener('click', ev => {
+    const b = ev.target.closest('.btnDiploma'); if(!b) return;
+    const a = est.mejores.find(x => String(x.matricula) === b.dataset.mat); if(!a) return;
+    descargarDiplomas([a], modo, `Diploma - ${a.alumno} - ${MODOS_TABLERO[modo].corto}`, b);
+  });
+
   const bm = $('#btnExpMejores');
   if(bm) bm.addEventListener('click', () => exportarCSV('mejores_promedios' + sufijo,
     est.mejores.map(a => ({grupo: a.grupo, matricula: a.matricula, alumno: a.alumno,
@@ -1303,6 +1320,160 @@ function abrirDetalleDocente(d, etiquetaModo, sufijo){
    coma, y Excel lo abría en una sola columna cuando su separador de lista
    era la coma. Con .xlsx no hay separador que adivinar ni acentos que se
    rompan. Si por alguna razón la librería no cargó, cae a CSV. */
+// ============================================================================
+//  DIPLOMAS DE MEJORES PROMEDIOS
+//  Se arman en el navegador sobre la plantilla (diploma/plantilla.pdf).
+//  Cambia: nombre, promedio, parcial, semestre y fecha de descarga.
+//  Archivos en la carpeta diploma/ junto a admin.html: plantilla.pdf,
+//  Courgette-Regular.ttf, PlayfairDisplay-Italic.ttf, pdf-lib.min.js y
+//  fontkit.umd.min.js. Solo se descargan la primera vez que se usa.
+// ============================================================================
+const DIPLOMA = {
+  azul: [8/255, 55/255, 98/255],          // #083762, el mismo de la plantilla
+  ordinal: {1:'primer', 2:'segundo', 3:'tercer', 4:'cuarto', 5:'quinto', 6:'sexto'},
+  meses: ['enero','febrero','marzo','abril','mayo','junio','julio','agosto',
+          'septiembre','octubre','noviembre','diciembre'],
+};
+
+// "TECNICO AGROPECUARIO" -> "Técnico Agropecuario"; lo que ya viene con
+// mayúsculas y minúsculas se respeta tal cual
+function nombreCarrera(n){
+  n = String(n || '').trim().replace(/\s+/g, ' ');
+  if(!n || n !== n.toUpperCase()) return n;
+  const chicas = new Set(['de','del','en','y','e','la','las','el','los','para','a']);
+  return n.toLowerCase().split(' ').map((p, i) => i && chicas.has(p) ? p
+    : p.charAt(0).toUpperCase() + p.slice(1)).join(' ').replace(/^Tecnico\b/, 'Técnico');
+}
+
+function textoDiploma(d){
+  const sem = DIPLOMA.ordinal[Number(d.semestre)];
+  const prom = Number(d.promedio).toFixed(2);
+  const carrera = nombreCarrera(d.carrera);
+  // "...en el segundo parcial del tercer semestre de la especialidad de Técnico Agropecuario."
+  const donde = (sem ? ` del ${sem} semestre` : '') + (carrera ? ` de la especialidad de ${carrera}` : '');
+  const logro = d.parcial
+    ? `Por haber obtenido un promedio de ${prom} en el ${d.parcial} parcial${donde}.`
+    : `Por haber obtenido un promedio general de ${prom}${donde ? ' en el' + donde.replace(/^ del/, '') : ''}.`;
+  return logro + ' Este logro es testimonio de su constancia y superación, y augura un futuro prometedor para su desarrollo personal y profesional.';
+}
+
+function fechaDiploma(f){
+  const dia = f.getDate();
+  const cuando = dia === 1 ? 'al primer día' : `a los ${dia} días`;
+  return `Quintana Roo, ${cuando} del mes de ${DIPLOMA.meses[f.getMonth()]} del ${f.getFullYear()}.`;
+}
+
+// Parte el texto en renglones que no pasen de "ancho"
+function renglones(texto, fuente, tam, ancho){
+  const palabras = texto.split(/\s+/);
+  const lineas = []; let actual = '';
+  for(const p of palabras){
+    const prueba = actual ? actual + ' ' + p : p;
+    if(fuente.widthOfTextAtSize(prueba, tam) <= ancho || !actual) actual = prueba;
+    else { lineas.push(actual); actual = p; }
+  }
+  if(actual) lineas.push(actual);
+  return lineas;
+}
+
+// recursos: {plantilla, nombre, cuerpo} como ArrayBuffer/Uint8Array
+// lista: [{alumno, promedio, parcial ('primer'|'segundo'|'tercer'|null), semestre}]
+async function armarDiplomas(PDFLib, fontkit, recursos, lista, fecha = new Date()){
+  const {PDFDocument, rgb} = PDFLib;
+  const salida = await PDFDocument.create();
+  salida.registerFontkit(fontkit);
+  const fNombre = await salida.embedFont(recursos.nombre, {subset: true});
+  const fCuerpo = await salida.embedFont(recursos.cuerpo, {subset: true});
+  const base = await PDFDocument.load(recursos.plantilla);
+  const [pagina] = await salida.embedPdf(base, [0]);
+  const azul = rgb(...DIPLOMA.azul);
+  const blanco = rgb(1, 1, 1);
+  const W = 841.89, H = 595.276;
+  const y = v => H - v;          // las medidas se tomaron desde arriba
+
+  for(const d of lista){
+    const pg = salida.addPage([W, H]);
+    pg.drawPage(pagina, {x: 0, y: 0, width: W, height: H});
+
+    // Se tapa lo que cambia (todo cae sobre el fondo blanco del diploma)
+    pg.drawRectangle({x: 236, y: y(337), width: 370, height: 26, color: blanco});   // nombre
+    pg.drawRectangle({x: 118, y: y(420), width: 616, height: 79, color: blanco});   // texto (cabe un 4.º renglón)
+    pg.drawRectangle({x: 400, y: y(548), width: 386, height: 42, color: blanco});   // lugar y fecha
+
+    // Nombre, centrado sobre la línea dorada; si es muy largo se achica
+    const nombre = 'A: ' + String(d.alumno).toUpperCase();
+    let tn = 16.6;
+    while(fNombre.widthOfTextAtSize(nombre, tn) > 400 && tn > 10) tn -= 0.2;
+    const wn = fNombre.widthOfTextAtSize(nombre, tn);
+    pg.drawText(nombre, {x: 419.5 - wn / 2, y: y(330.3), size: tn, font: fNombre, color: azul});
+
+    // Texto del reconocimiento: mismo tamaño, renglones y centro que la plantilla
+    const tc = 15.52, centro = 425.5;
+    let tp = tc, lineas = renglones(textoDiploma(d), fCuerpo, tp, 600);
+    while(lineas.length > 4 && tp > 11){ tp -= 0.25; lineas = renglones(textoDiploma(d), fCuerpo, tp, 640); }
+    const salto = tp * 1.1;
+    lineas.forEach((l, i) => {
+      const w = fCuerpo.widthOfTextAtSize(l, tp);
+      pg.drawText(l, {x: centro - w / 2, y: y(359.99 + i * salto), size: tp, font: fCuerpo, color: azul});
+    });
+
+    // Lugar y fecha de descarga
+    [ 'Se extiende el presente en la Alcaldía de Dziuché,', fechaDiploma(fecha) ].forEach((l, i) => {
+      let t = tc;   // que no toque el marco dorado (meses largos, "al primer día")
+      while(fCuerpo.widthOfTextAtSize(l, t) > 366 && t > 11) t -= 0.1;
+      const w = fCuerpo.widthOfTextAtSize(l, t);
+      pg.drawText(l, {x: 591.6 - w / 2, y: y(525.48 + i * 17.06), size: t, font: fCuerpo, color: azul});
+    });
+  }
+  salida.setTitle('Diploma - Mejores promedios - CBTA 291');
+  salida.setAuthor('CBTA No. 291 «Ignacio Ramírez Calzada»');
+  return salida.save();
+}
+
+
+let recursosDiplomaCache = null;
+function cargarScript(src){
+  return new Promise((ok, mal) => {
+    const s = document.createElement('script');
+    s.src = src; s.onload = ok; s.onerror = () => mal(new Error('No se pudo cargar ' + src));
+    document.head.appendChild(s);
+  });
+}
+async function recursosDiploma(){
+  if(recursosDiplomaCache) return recursosDiplomaCache;
+  if(!window.PDFLib) await cargarScript('diploma/pdf-lib.min.js');
+  if(!window.fontkit) await cargarScript('diploma/fontkit.umd.min.js');
+  const bajar = async f => {
+    const r = await fetch('diploma/' + f, {cache: 'force-cache'});
+    if(!r.ok) throw new Error(`Falta el archivo diploma/${f} en el sitio`);
+    return r.arrayBuffer();
+  };
+  const [plantilla, nombre, cuerpo] = await Promise.all(
+    ['plantilla.pdf', 'Courgette-Regular.ttf', 'PlayfairDisplay-Italic.ttf'].map(bajar));
+  return (recursosDiplomaCache = {plantilla, nombre, cuerpo});
+}
+
+// lista: alumnos de "mejores" (alumno, promedio, semestre); modo: general | p1 | p2 | p3
+async function descargarDiplomas(lista, modo, archivo, boton){
+  const texto = boton?.textContent;
+  if(boton){ boton.disabled = true; boton.textContent = 'Preparando…'; }
+  try{
+    const rec = await recursosDiploma();
+    const parcial = {p1:'primer', p2:'segundo', p3:'tercer'}[modo] || null;
+    const datos = lista.map(a => ({alumno: a.alumno, promedio: a.promedio, semestre: a.semestre, carrera: a.carrera, parcial}));
+    const bytes = await armarDiplomas(window.PDFLib, window.fontkit, rec, datos, new Date());
+    const url = URL.createObjectURL(new Blob([bytes], {type: 'application/pdf'}));
+    const enlace = document.createElement('a');
+    enlace.href = url; enlace.download = archivo.replace(/[\\/:*?"<>|]+/g, '') + '.pdf';
+    document.body.appendChild(enlace); enlace.click(); enlace.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  }catch(e){
+    alert('No se pudieron generar los diplomas: ' + e.message);
+  }finally{
+    if(boton){ boton.disabled = false; boton.textContent = texto; }
+  }
+}
+
 function exportarCSV(nombre, filas, columnas){
   if(!filas || !filas.length){ alert('No hay datos que exportar.'); return; }
   const cols = columnas || Object.keys(filas[0]);
