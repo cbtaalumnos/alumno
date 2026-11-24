@@ -2081,7 +2081,9 @@ const CAMPOS_ALUMNO = [
   {c:'activo', r:'Activo', tipo:'bool'}
 ];
 
-let filtroAlumnos = {grupo_id:'', busqueda:'', acceso:'', fechaEdad:''};
+let filtroAlumnos = {semestre:'', grupo_id:'', busqueda:'', acceso:'', fechaEdad:''};
+const SEMESTRE_TXT = {1:'Primer', 2:'Segundo', 3:'Tercer', 4:'Cuarto', 5:'Quinto', 6:'Sexto'};
+const nombreSemestre = s => `${SEMESTRE_TXT[s] || s + '.º'} semestre`;
 
 /* Sexo y fecha de nacimiento: SIEMPRE de la CURP, que es el dato oficial
    (posición 11 = H/M/X, posiciones 5-10 = AAMMDD; el carácter 17 es número
@@ -2138,6 +2140,16 @@ function exportarLibro(nombre, hojas){
 }
 
 async function verAlumnos(){
+  // Semestre: sale del grupo. Si el grupo elegido no es de ese semestre, se suelta.
+  const semSel = filtroAlumnos.semestre ? Number(filtroAlumnos.semestre) : null;
+  const semDe = id => buscaEn('grupos', id)?.semestre ?? null;
+  if(semSel && filtroAlumnos.grupo_id && Number(semDe(Number(filtroAlumnos.grupo_id))) !== semSel)
+    filtroAlumnos.grupo_id = '';
+  const semestres = [...new Set((lookups.grupos || []).map(g => Number(g.semestre)).filter(Boolean))].sort((a, b) => a - b);
+  const gruposMenu = (lookups.grupos || []).filter(g => !semSel || Number(g.semestre) === semSel);
+  const ambito = filtroAlumnos.grupo_id ? escapar(etiquetaRef('grupos', Number(filtroAlumnos.grupo_id)))
+               : semSel ? nombreSemestre(semSel) : 'todo el plantel';
+
   const filtros = {};
   if(filtroAlumnos.grupo_id) filtros.grupo_id = Number(filtroAlumnos.grupo_id);
 
@@ -2150,7 +2162,8 @@ async function verAlumnos(){
     orden:'apellido_paterno', limite:1000
   });
   if(!r.ok) throw new Error(r.error);
-  const todos = ordenar('alumnos', r.datos);
+  const todos = ordenar('alumnos', r.datos)
+    .filter(a => !semSel || Number(semDe(a.grupo_id)) === semSel);
 
   /* ¿Quién ya creó su contraseña del portal? Se cuentan solo los activos.
      El filtro de acceso se aplica aquí, sobre la lista ya traída. */
@@ -2201,9 +2214,15 @@ async function verAlumnos(){
   $('#vista').innerHTML = `
     <div class="herramientas">
       <div class="campo">
+        <label for="fSemestre">Semestre</label>
+        <select id="fSemestre"><option value="">Todos</option>
+          ${semestres.map(s => `<option value="${s}"${semSel === s ? ' selected' : ''}>${nombreSemestre(s)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="campo">
         <label for="fGrupo">Grupo</label>
-        <select id="fGrupo"><option value="">Todos los grupos</option>
-          ${(lookups.grupos||[]).map(g => `<option value="${g.id}"${String(filtroAlumnos.grupo_id)===String(g.id)?' selected':''}>${escapar(nombreGrupo(g))}</option>`).join('')}
+        <select id="fGrupo"><option value="">${semSel ? 'Todos los de ' + nombreSemestre(semSel).toLowerCase() : 'Todos los grupos'}</option>
+          ${gruposMenu.map(g => `<option value="${g.id}"${String(filtroAlumnos.grupo_id)===String(g.id)?' selected':''}>${escapar(nombreGrupo(g))}</option>`).join('')}
         </select>
       </div>
       <div class="campo">
@@ -2226,8 +2245,7 @@ async function verAlumnos(){
     ${perfiles.length ? `
     <div class="tarjeta" style="margin-bottom:18px">
       <h3>Hombres y mujeres
-        <span style="font-weight:400;color:var(--texto-suave)">· ${
-          filtroAlumnos.grupo_id ? escapar(etiquetaRef('grupos', Number(filtroAlumnos.grupo_id))) : 'todo el plantel'}</span>
+        <span style="font-weight:400;color:var(--texto-suave)">· ${ambito}</span>
         <span class="der" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
           <label style="font-size:12.5px;color:var(--texto-suave);display:flex;align-items:center;gap:6px;font-weight:400">
             Edad al
@@ -2273,8 +2291,7 @@ async function verAlumnos(){
     ${activos.length ? `
     <div class="tarjeta" style="margin-bottom:18px">
       <h3>Contraseñas creadas
-        <span style="font-weight:400;color:var(--texto-suave)">· ${
-          filtroAlumnos.grupo_id ? escapar(etiquetaRef('grupos', Number(filtroAlumnos.grupo_id))) : 'todo el plantel'}${
+        <span style="font-weight:400;color:var(--texto-suave)">· ${ambito}${
           filtroAlumnos.busqueda ? ' · búsqueda «' + escapar(filtroAlumnos.busqueda) + '»' : ''}</span></h3>
       <div class="cuerpo">
         <div style="display:flex;flex-wrap:wrap;gap:22px;align-items:center">
@@ -2307,7 +2324,8 @@ async function verAlumnos(){
 
     <div class="tarjeta">
       <h3>${filtroAlumnos.acceso === 'con' ? 'Alumnos que ya crearon contraseña'
-          : filtroAlumnos.acceso === 'sin' ? 'Alumnos que todavía usan su CURP' : 'Alumnos'} <span style="font-weight:400;color:var(--texto-suave)">(${filas.length})</span>
+          : filtroAlumnos.acceso === 'sin' ? 'Alumnos que todavía usan su CURP' : 'Alumnos'}${
+          semSel && !filtroAlumnos.grupo_id ? ' · ' + nombreSemestre(semSel).toLowerCase() : ''} <span style="font-weight:400;color:var(--texto-suave)">(${filas.length})</span>
         <span class="der"><button class="boton tenue chico" id="btnExpAl">Exportar a Excel</button></span></h3>
       ${filas.length ? `
         <div class="tabla-marco">
@@ -2332,15 +2350,18 @@ async function verAlumnos(){
     </div>`;
 
   $('#btnBuscar').addEventListener('click', () => {
+    filtroAlumnos.semestre = $('#fSemestre').value;
     filtroAlumnos.grupo_id = $('#fGrupo').value;
     filtroAlumnos.busqueda = $('#fBusca').value.trim();
     filtroAlumnos.acceso = $('#fAcceso').value;
     irA('alumnos');
   });
   $('#fAcceso').addEventListener('change', () => $('#btnBuscar').click());
+  $('#fSemestre').addEventListener('change', () => { $('#fGrupo').value = ''; $('#btnBuscar').click(); });
 
   const sufijo = filtroAlumnos.grupo_id
-    ? '_' + nombreArchivoSeguro(etiquetaRef('grupos', Number(filtroAlumnos.grupo_id))) : '';
+    ? '_' + nombreArchivoSeguro(etiquetaRef('grupos', Number(filtroAlumnos.grupo_id)))
+    : semSel ? '_' + nombreArchivoSeguro(nombreSemestre(semSel)) : '';
   const fila = p => ({grupo: p.grupo, matricula: p.a.matricula, nombre: nombreCompleto(p.a)});
 
   const bSexo = $('#btnExpSexo');
@@ -2400,7 +2421,7 @@ async function verAlumnos(){
   $('#fGrupo').addEventListener('change', () => $('#btnBuscar').click());
   $('#btnNuevoAlumno').addEventListener('click', () => formAlumno(null));
   $('#btnImportar').addEventListener('click', ventanaImportar);
-  $('#btnExpAl').addEventListener('click', () => exportarCSV('alumnos', filas.map(a => ({
+  $('#btnExpAl').addEventListener('click', () => exportarCSV('alumnos' + sufijo, filas.map(a => ({
     matricula:a.matricula, curp:a.curp, apellido_paterno:a.apellido_paterno,
     apellido_materno:a.apellido_materno, nombres:a.nombres,
     grupo: etiquetaRef('grupos', a.grupo_id), estatus:a.estatus, celular:a.celular,
