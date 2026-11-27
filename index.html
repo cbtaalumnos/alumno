@@ -881,6 +881,9 @@ async function irA(vista){
   $('#vista').innerHTML = '<div class="cargando">Cargando…</div>';
   window.scrollTo(0,0);
 
+  // Uso del portal: se avisa qué sección se abrió (sin esperar respuesta)
+  if(sesion?.token) llamar('portal-alumno', {accion:'visita', vista, token:sesion.token}).catch(() => {});
+
   try {
     if(vista === 'inicio')              await verInicio();
     else if(vista === 'datos')          await verDatos();

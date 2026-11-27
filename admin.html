@@ -276,6 +276,7 @@ table.datos input.celda:focus{outline:2px solid var(--cian);outline-offset:0;bor
 
       <div class="menu-grupo">Alumnado</div>
       <button data-vista="alumnos"><span class="ic">▣</span> Alumnos</button>
+      <button data-vista="uso"><span class="ic">◷</span> Uso del portal</button>
       <button data-vista="documentos"><span class="ic">▧</span> Documentos</button>
       <button data-vista="reportes"><span class="ic">✦</span> Reportes</button>
 
@@ -626,7 +627,7 @@ function ordenarPorMateria(filas){
    NAVEGACIÓN
    ========================================================================== */
 const TITULOS = {
-  tablero:'Tablero', alumnos:'Alumnos', documentos:'Documentos',
+  tablero:'Tablero', alumnos:'Alumnos', uso:'Uso del portal', documentos:'Documentos',
   reportes:'Reportes', asignaciones:'Materias por grupo',
   horarios:'Horarios', grupos:'Grupos', materias:'Materias', docentes:'Docentes', modulos:'Módulos y submódulos',
   carreras:'Carreras', periodos:'Periodos', avisos:'Avisos', usuarios:'Usuarios del panel', notificaciones:'Notificaciones al alumno', apariencia:'Apariencia del portal',
@@ -671,6 +672,7 @@ async function irA(vista){
     else if(vista==='horarios')       await verHorarios();
     else if(vista==='importar')       verImportar();
     else if(vista==='asistencia')     await verAsistencia();
+    else if(vista==='uso')            await verUso();
     else if(vista==='respaldo')       await verRespaldo();
     else if(vista==='cierre')         await verCierre();
     else if(vista==='materias')       await verMaterias();
@@ -4846,6 +4848,248 @@ const ESTADOS_ASIST = {
 };
 
 let asistLeida = null, asistDias = [], asistModo = 'ausencias', asistArchivo = '';
+
+/* ==========================================================================
+   USO DEL PORTAL
+   Quién entra al portal del alumno, cuándo y a qué secciones.
+   El registro empieza el día que se instala uso.sql; antes de eso solo se
+   sabe si el alumno ya creó su contraseña (es decir, si entró alguna vez).
+   ========================================================================== */
+let filtroUso = {periodo:'7', semestre:'', grupo_id:'', lista:'no_periodo'};
+const SECCIONES_PORTAL = {inicio:'Inicio', calificaciones:'Calificaciones', asistencia:'Asistencia',
+  horario:'Horario', documentos:'Documentos', avisos:'Avisos', reportes:'Mis reportes', datos:'Mis datos',
+  clave:'Contraseña'};
+
+function inicioSemestre(h){
+  // Agosto–enero y febrero–julio, como el resto del panel
+  if(h.mo >= 8) return `${h.y}-08-01`;
+  if(h.mo === 1) return `${h.y - 1}-08-01`;
+  return `${h.y}-02-01`;
+}
+function restarDias(iso, n){
+  const d = new Date(iso + 'T12:00:00'); d.setDate(d.getDate() - n);
+  return d.toISOString().slice(0, 10);
+}
+function fechaCorta(iso){
+  const [y, m, d] = iso.split('-').map(Number);
+  return `${d} ${['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic'][m - 1]}`;
+}
+function haceCuanto(ts, hoyIso){
+  if(!ts) return '';
+  const dia = new Date(ts).toLocaleDateString('en-CA', {timeZone:'America/Cancun'});
+  const n = Math.round((new Date(hoyIso + 'T12:00:00') - new Date(dia + 'T12:00:00')) / 86400000);
+  const hora = new Date(ts).toLocaleTimeString('es-MX', {timeZone:'America/Cancun', hour:'2-digit', minute:'2-digit'});
+  return n === 0 ? `Hoy, ${hora}` : n === 1 ? `Ayer, ${hora}` : n < 7 ? `Hace ${n} días` : fechaCorta(dia) + (dia.slice(0,4) !== hoyIso.slice(0,4) ? ' ' + dia.slice(0,4) : '');
+}
+
+async function verUso(){
+  const hoy = hoyLocal();
+  const desde = filtroUso.periodo === 'hoy' ? hoy.iso
+              : filtroUso.periodo === 'semestre' ? inicioSemestre(hoy)
+              : restarDias(hoy.iso, Number(filtroUso.periodo) - 1);
+
+  const [ru, ra] = await Promise.all([
+    api('uso_portal', {desde}),
+    api('listar', {tabla:'alumnos',
+      columnas:'id,matricula,apellido_paterno,apellido_materno,nombres,grupo_id,activo,password_hash', limite:3000})
+  ]);
+  if(!ru.ok) throw new Error(ru.error);
+  if(!ra.ok) throw new Error(ra.error);
+
+  // Filtros de semestre y grupo (el semestre sale del grupo)
+  const semSel = filtroUso.semestre ? Number(filtroUso.semestre) : null;
+  if(semSel && filtroUso.grupo_id && Number(buscaEn('grupos', Number(filtroUso.grupo_id))?.semestre) !== semSel) filtroUso.grupo_id = '';
+  const semestres = [...new Set((lookups.grupos || []).map(g => Number(g.semestre)).filter(Boolean))].sort((a, b) => a - b);
+  const gruposMenu = (lookups.grupos || []).filter(g => !semSel || Number(g.semestre) === semSel);
+  const ambito = filtroUso.grupo_id ? etiquetaRef('grupos', Number(filtroUso.grupo_id))
+               : semSel ? nombreSemestre(semSel) : 'todo el plantel';
+
+  const alumnos = ordenar('alumnos', ra.datos).filter(a => a.activo !== false
+    && (!filtroUso.grupo_id || String(a.grupo_id) === String(filtroUso.grupo_id))
+    && (!semSel || Number(buscaEn('grupos', a.grupo_id)?.semestre) === semSel));
+  const ids = new Set(alumnos.map(a => a.id));
+
+  const filasDia = ru.dias.filter(d => ids.has(d.alumno_id));
+  const total = new Map(ru.total.map(t => [t.alumno_id, t]));
+  const registroDesde = ru.total.length ? ru.total.map(t => t.primera).sort()[0] : null;
+
+  // Por alumno en el periodo
+  const enPeriodo = new Map();
+  filasDia.forEach(d => {
+    if(!enPeriodo.has(d.alumno_id)) enPeriodo.set(d.alumno_id, {dias:0, visitas:0});
+    const x = enPeriodo.get(d.alumno_id); x.dias++; x.visitas += d.visitas || 0;
+  });
+  const perfil = alumnos.map(a => {
+    const g = a.grupo_id ? buscaEn('grupos', a.grupo_id) : null;
+    const t = total.get(a.id);
+    const p = enPeriodo.get(a.id);
+    return {a, g, grupo: g ? nombreGrupo(g) : 'Sin grupo',
+      nombre: `${a.apellido_paterno ?? ''} ${a.apellido_materno ?? ''} ${a.nombres ?? ''}`.replace(/\s+/g, ' ').trim(),
+      ultima: t?.ultima || null, diasTotal: t?.dias || 0,
+      diasPeriodo: p?.dias || 0, visitasPeriodo: p?.visitas || 0,
+      alguna: !!(t || a.password_hash)};   // con contraseña = ya entró alguna vez
+  }).sort((x, y) => (x.g && y.g ? ORDENES.grupos(x.g, y.g) : (x.g ? -1 : y.g ? 1 : 0)) || ORDENES.alumnos(x.a, y.a));
+
+  const nAct = perfil.length;
+  const entraron = perfil.filter(p => p.diasPeriodo > 0);
+  const nunca = perfil.filter(p => !p.alguna);
+  const pct = n => nAct ? Math.round(100 * n / nAct) : 0;
+  const visitas = filasDia.reduce((s, d) => s + (d.visitas || 0), 0);
+  const colorPct = p => p >= 60 ? 'var(--verde)' : p >= 30 ? 'var(--ambar)' : 'var(--rojo)';
+
+  // Alumnos distintos por día
+  const nDias = Math.round((new Date(hoy.iso + 'T12:00:00') - new Date(desde + 'T12:00:00')) / 86400000) + 1;
+  const porDia = new Map();
+  filasDia.forEach(d => porDia.set(d.dia, (porDia.get(d.dia) || 0) + 1));
+  const serie = Array.from({length: nDias}, (_, i) => { const f = restarDias(hoy.iso, nDias - 1 - i); return {f, n: porDia.get(f) || 0}; });
+  const maxDia = Math.max(1, ...serie.map(s => s.n));
+
+  // Por grupo
+  const porGrupo = new Map();
+  perfil.forEach(p => {
+    const k = p.grupo;
+    if(!porGrupo.has(k)) porGrupo.set(k, {grupo: k, g: p.g, total:0, entraron:0, nunca:0});
+    const x = porGrupo.get(k); x.total++; if(p.diasPeriodo) x.entraron++; if(!p.alguna) x.nunca++;
+  });
+  const grupos = [...porGrupo.values()];
+
+  // Secciones: cuántos alumnos-día abrieron cada una
+  const secc = new Map();
+  filasDia.forEach(d => (d.secciones || []).forEach(s => secc.set(s, (secc.get(s) || 0) + 1)));
+  const seccOrden = [...secc.entries()].sort((a, b) => b[1] - a[1]);
+  const maxSecc = Math.max(1, ...seccOrden.map(s => s[1]));
+
+  const listas = {
+    no_periodo: {t:'No han entrado en este periodo', f: perfil.filter(p => !p.diasPeriodo)},
+    nunca:      {t:'Nunca han entrado', f: nunca},
+    si_periodo: {t:'Sí entraron en este periodo', f: entraron},
+    todos:      {t:'Todos', f: perfil}};
+  const lista = listas[filtroUso.lista] || listas.no_periodo;
+  const etiquetaPeriodo = {hoy:'hoy', '7':'los últimos 7 días', '30':'los últimos 30 días', semestre:'este semestre'}[filtroUso.periodo];
+
+  $('#vista').innerHTML = `
+    <div class="herramientas">
+      <div class="campo"><label for="uPeriodo">Periodo</label>
+        <select id="uPeriodo">
+          ${[['hoy','Hoy'],['7','Últimos 7 días'],['30','Últimos 30 días'],['semestre','Este semestre']].map(([v, t]) =>
+            `<option value="${v}"${filtroUso.periodo === v ? ' selected' : ''}>${t}</option>`).join('')}
+        </select></div>
+      <div class="campo"><label for="uSemestre">Semestre</label>
+        <select id="uSemestre"><option value="">Todos</option>
+          ${semestres.map(s => `<option value="${s}"${semSel === s ? ' selected' : ''}>${nombreSemestre(s)}</option>`).join('')}
+        </select></div>
+      <div class="campo"><label for="uGrupo">Grupo</label>
+        <select id="uGrupo"><option value="">${semSel ? 'Todos los de ' + nombreSemestre(semSel).toLowerCase() : 'Todos los grupos'}</option>
+          ${gruposMenu.map(g => `<option value="${g.id}"${String(filtroUso.grupo_id) === String(g.id) ? ' selected' : ''}>${escapar(nombreGrupo(g))}</option>`).join('')}
+        </select></div>
+    </div>
+
+    ${!ru.total.length ? `<div class="recado ojo" style="margin-bottom:16px">Todavía no hay entradas registradas. El registro empieza en cuanto
+      se instala la actualización; mientras tanto, "Nunca han entrado" se calcula con quién no ha creado su contraseña.</div>` : ''}
+
+    <div class="tarjeta" style="margin-bottom:18px">
+      <h3>Uso del portal <span style="font-weight:400;color:var(--texto-suave)">· ${escapar(ambito)} · ${etiquetaPeriodo}</span>
+        <span class="der"><button class="boton tenue chico" id="btnExpUso">Exportar a Excel</button></span></h3>
+      <div class="cuerpo">
+        <div style="display:flex;flex-wrap:wrap;gap:34px;align-items:flex-start">
+          <div><div style="font-size:12.5px;color:var(--texto-suave)">Entraron</div>
+            <div style="font-size:34px;font-weight:800;line-height:1.1;color:${colorPct(pct(entraron.length))}">${pct(entraron.length)}%</div>
+            <div style="font-size:12.5px;color:var(--texto-suave)"><b style="color:var(--texto)">${entraron.length}</b> de ${nAct} alumnos</div></div>
+          <div><div style="font-size:12.5px;color:var(--texto-suave)">Secciones abiertas</div>
+            <div style="font-size:34px;font-weight:800;line-height:1.1">${visitas}</div>
+            <div style="font-size:12.5px;color:var(--texto-suave)">${entraron.length ? (visitas / entraron.length).toFixed(1) + ' por alumno' : '—'}</div></div>
+          <div><div style="font-size:12.5px;color:var(--texto-suave)">Nunca han entrado</div>
+            <div style="font-size:34px;font-weight:800;line-height:1.1;color:${nunca.length ? 'var(--rojo)' : 'var(--verde)'}">${nunca.length}</div>
+            <div style="font-size:12.5px;color:var(--texto-suave)">${pct(nunca.length)}% · no han creado su contraseña</div></div>
+          ${nDias > 1 ? `
+          <div style="flex:1;min-width:280px">
+            <div style="font-size:12.5px;color:var(--texto-suave);margin-bottom:6px">Alumnos que entraron cada día</div>
+            <div style="display:flex;align-items:flex-end;gap:${nDias > 60 ? 1 : 3}px;height:90px;border-bottom:1px solid var(--linea)">
+              ${serie.map(s => `<div title="${fechaCorta(s.f)}: ${s.n} alumnos" style="flex:1;min-width:2px;height:${Math.max(s.n ? 4 : 1, Math.round(86 * s.n / maxDia))}px;
+                background:${s.n ? 'var(--verde)' : 'var(--linea)'};border-radius:2px 2px 0 0"></div>`).join('')}
+            </div>
+            <div style="display:flex;justify-content:space-between;font-size:11.5px;color:var(--texto-suave);margin-top:4px">
+              <span>${fechaCorta(serie[0].f)}</span><span>máx. ${maxDia} en un día</span><span>${fechaCorta(serie[serie.length - 1].f)}</span></div>
+          </div>` : ''}
+        </div>
+        ${registroDesde ? `<div style="font-size:12px;color:var(--texto-suave);margin-top:12px">Registro de entradas desde el ${
+          escapar(fechaCorta(new Date(registroDesde).toLocaleDateString('en-CA', {timeZone:'America/Cancun'})))}.</div>` : ''}
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:18px;margin-bottom:18px">
+      <div class="tarjeta">
+        <h3>Por grupo <span style="font-weight:400;color:var(--texto-suave)">· entraron en ${etiquetaPeriodo}</span></h3>
+        <div class="cuerpo" style="display:grid;gap:7px">
+          ${grupos.map(x => { const p = x.total ? Math.round(100 * x.entraron / x.total) : 0;
+            return `<button class="usoGrupo" data-g="${x.g ? x.g.id : ''}" title="Ver este grupo"
+              style="all:unset;cursor:pointer;display:grid;grid-template-columns:86px 1fr 64px;gap:10px;align-items:center">
+              <span style="font-size:13px;font-weight:600">${escapar(x.grupo)}</span>
+              <span style="background:#EDF2EB;border-radius:4px;height:9px;overflow:hidden">
+                <span style="display:block;width:${p}%;height:100%;background:${colorPct(p)}"></span></span>
+              <span style="font-size:12.5px;text-align:right;color:var(--texto-suave);font-variant-numeric:tabular-nums">${x.entraron}/${x.total}</span>
+            </button>`; }).join('') || '<div style="color:var(--texto-suave)">Sin alumnos.</div>'}
+        </div>
+      </div>
+      <div class="tarjeta">
+        <h3>Secciones más vistas <span style="font-weight:400;color:var(--texto-suave)">· alumnos por día</span></h3>
+        <div class="cuerpo" style="display:grid;gap:7px">
+          ${seccOrden.length ? seccOrden.map(([s, n]) => `
+            <div style="display:grid;grid-template-columns:110px 1fr 40px;gap:10px;align-items:center">
+              <span style="font-size:13px;font-weight:600">${escapar(SECCIONES_PORTAL[s] || s)}</span>
+              <span style="background:#EDF2EB;border-radius:4px;height:9px;overflow:hidden">
+                <span style="display:block;width:${Math.round(100 * n / maxSecc)}%;height:100%;background:var(--marca, var(--verde))"></span></span>
+              <span style="font-size:12.5px;text-align:right;color:var(--texto-suave);font-variant-numeric:tabular-nums">${n}</span>
+            </div>`).join('') : '<div style="color:var(--texto-suave);font-size:13px">Sin datos en este periodo.</div>'}
+        </div>
+      </div>
+    </div>
+
+    <div class="tarjeta">
+      <h3>${escapar(lista.t)} <span style="font-weight:400;color:var(--texto-suave)">(${lista.f.length})</span>
+        <span class="der">
+          <select id="uLista" style="padding:5px 8px;border:1.5px solid var(--linea-fuerte);border-radius:7px;font-size:13px">
+            ${Object.entries(listas).map(([k, v]) => `<option value="${k}"${filtroUso.lista === k ? ' selected' : ''}>${v.t} (${v.f.length})</option>`).join('')}
+          </select></span></h3>
+      ${lista.f.length ? `
+      <div class="tabla-marco"><table class="datos">
+        <thead><tr><th>Matrícula</th><th>Nombre</th><th>Grupo</th><th>Última vez</th><th>Días en el periodo</th><th>Contraseña</th></tr></thead>
+        <tbody>${lista.f.map(p => `<tr>
+          <td>${escapar(p.a.matricula)}</td><td><b>${escapar(p.nombre)}</b></td><td>${escapar(p.grupo)}</td>
+          <td>${p.ultima ? escapar(haceCuanto(p.ultima, hoy.iso)) : p.alguna ? '<span style="color:var(--texto-suave)">Antes del registro</span>' : '<span class="sello cae">Nunca</span>'}</td>
+          <td style="font-variant-numeric:tabular-nums">${p.diasPeriodo || '—'}</td>
+          <td>${p.a.password_hash ? '<span class="sello info">Creada</span>' : '<span class="sello espera">Usa su CURP</span>'}</td>
+        </tr>`).join('')}</tbody></table></div>`
+      : '<div class="vacio"><div class="g">✓</div><p>Nadie en esta lista.</p></div>'}
+    </div>`;
+
+  const recargar = () => irA('uso');
+  $('#uPeriodo').addEventListener('change', e => { filtroUso.periodo = e.target.value; recargar(); });
+  $('#uSemestre').addEventListener('change', e => { filtroUso.semestre = e.target.value; filtroUso.grupo_id = ''; recargar(); });
+  $('#uGrupo').addEventListener('change', e => { filtroUso.grupo_id = e.target.value; recargar(); });
+  $('#uLista').addEventListener('change', e => { filtroUso.lista = e.target.value; recargar(); });
+  $$('#vista .usoGrupo').forEach(b => b.addEventListener('click', () => {
+    if(!b.dataset.g) return; filtroUso.grupo_id = b.dataset.g; recargar();
+  }));
+
+  $('#btnExpUso').addEventListener('click', () => {
+    const fila = p => ({grupo: p.grupo, matricula: p.a.matricula, nombre: p.nombre,
+      ultima: p.ultima ? new Date(p.ultima).toLocaleString('es-MX', {timeZone:'America/Cancun'}) : (p.alguna ? 'Antes del registro' : 'Nunca'),
+      dias_periodo: p.diasPeriodo, visitas_periodo: p.visitasPeriodo, dias_total: p.diasTotal,
+      contrasena: p.a.password_hash ? 'Creada' : 'Usa su CURP'});
+    const cols = ['grupo','matricula','nombre','ultima','dias_periodo','visitas_periodo','dias_total','contrasena'];
+    const tit = ['Grupo','Matrícula','Nombre','Última vez','Días en el periodo','Secciones abiertas en el periodo','Días en total','Contraseña'];
+    const sufijo = '_' + nombreArchivoSeguro(ambito) + '_' + {hoy:'hoy','7':'7dias','30':'30dias',semestre:'semestre'}[filtroUso.periodo];
+    exportarLibro('uso_portal' + sufijo, [
+      {nombre:'Por grupo', columnas:['grupo','total','entraron','pct','nunca'],
+       titulos:['Grupo','Alumnos activos','Entraron en el periodo','% que entró','Nunca han entrado'],
+       filas: grupos.map(x => ({grupo: x.grupo, total: x.total, entraron: x.entraron,
+         pct: x.total ? Math.round(100 * x.entraron / x.total) + '%' : '0%', nunca: x.nunca}))},
+      {nombre:`No entraron (${listas.no_periodo.f.length})`, columnas: cols, titulos: tit, filas: listas.no_periodo.f.map(fila)},
+      {nombre:`Nunca (${nunca.length})`, columnas: cols, titulos: tit, filas: nunca.map(fila)},
+      {nombre:'Todos', columnas: cols, titulos: tit, filas: perfil.map(fila)}]);
+  });
+}
 
 async function verAsistencia(){
   asistLeida = null;
