@@ -685,6 +685,7 @@ async function irA(vista){
     else if(vista==='clave')          verClave();
     else                              await verCatalogo(vista);
   }catch(e){
+    if(vistaActual !== vista) return;   // el error es de una sección que ya se dejó
     $('#vista').innerHTML = `<div class="recado mal">No se pudieron cargar los datos: ${escapar(e.message||e)}</div>`;
   }
 }
@@ -804,6 +805,7 @@ async function verTablero(){
 
   tableroDatos = {r, filas, alumnos, diasCargados, faltasPorGrupo,
                   umbral: Number(r.umbral_riesgo ?? 3)};
+  if(vistaActual !== 'tablero') return;   // el usuario ya se fue a otra sección
   pintarTablero();
 }
 
@@ -1651,6 +1653,8 @@ async function verCatalogo(tabla){
   // llene de columnas vacías que nadie consulta.
   const camposTabla = def.campos.filter(c => !c.soloForma);
 
+  if(vistaActual !== tabla) return;   // el usuario ya se fue a otra sección
+
   $('#vista').innerHTML = `
     ${fp ? `<div class="herramientas">
       <div class="campo crece">
@@ -2212,6 +2216,8 @@ async function verAlumnos(){
     const x = sexoPorGrupo.get(p.grupo);
     x.total++; if(p.sexo === 'HOMBRE') x.H++; else if(p.sexo === 'MUJER') x.M++; else x.O++;
   });
+
+  if(vistaActual !== 'alumnos') return;   // el usuario ya se fue a otra sección
 
   $('#vista').innerHTML = `
     <div class="herramientas">
@@ -2785,6 +2791,8 @@ async function verMaterias(){
   const lista = [...grupos.values()].sort((a,b) =>
     (a.semestre - b.semestre) || cmp(a.nombre, b.nombre));
 
+  if(vistaActual !== 'materias') return;   // el usuario ya se fue a otra sección
+
   $('#vista').innerHTML = `
     <div class="tarjeta">
       <h3>Materias <span style="font-weight:400;color:var(--texto-suave)">(${lista.length})</span>
@@ -2897,6 +2905,8 @@ async function verDocentes(){
   });
 
   const sinDocente = (asig.ok ? asig.datos : []).filter(a => !a.docente_id).length;
+
+  if(vistaActual !== 'docentes') return;   // el usuario ya se fue a otra sección
 
   $('#vista').innerHTML = `
     ${sinDocente ? `<div class="recado ojo" style="margin-top:0">
@@ -3030,6 +3040,8 @@ async function verAsignaciones(){
       sinDoc ? ` · ${sinDoc} sin docente` : ''}</option>`;
   };
 
+  if(vistaActual !== 'asignaciones') return;   // el usuario ya se fue a otra sección
+
   $('#vista').innerHTML = `
     <div class="herramientas" style="display:flex;flex-wrap:wrap;align-items:center;gap:12px">
       ${idsGrupo.length ? `
@@ -3133,6 +3145,7 @@ async function verModulos(){
   const r = await api('listar', {tabla:'materia_modulo', limite:2000});
   if(!r.ok) throw new Error(r.error.includes('permitida')
     ? 'Falta actualizar la función admin-api a la versión 23 y correr el SQL de módulos.' : r.error);
+  if(vistaActual !== 'modulos') return;   // el usuario ya se fue a otra sección
   pintarModulos(r.datos);
 
   // Un solo detector de clics por visita: el contenedor se repinta muchas
@@ -3366,6 +3379,8 @@ async function verNotificaciones(){
 
   const porc = r.activos ? Math.round(100 * r.alumnos / r.activos) : 0;
 
+  if(vistaActual !== 'notificaciones') return;   // el usuario ya se fue a otra sección
+
   $('#vista').innerHTML = `
     <div class="medidores">
       <div class="medidor ${r.configurado ? 'bien' : 'alerta'}"><div class="r">Estado</div>
@@ -3498,6 +3513,8 @@ async function verUsuarios(){
     ? 'Falta actualizar la función admin-api a la versión 25.' : r.error);
   const lista = r.usuarios;
 
+  if(vistaActual !== 'usuarios') return;   // el usuario ya se fue a otra sección
+
   $('#vista').innerHTML = `
     <div class="herramientas">
       <button class="boton" id="btnNuevoVisor">Agregar visor</button>
@@ -3606,6 +3623,8 @@ async function verApariencia(){
   if(!temaVistaPrevia) ponerTemaVigente('panel');
   const cfg = JSON.parse(JSON.stringify(temaConfig));
   const hoyTema = temaQueToca(cfg);
+
+  if(vistaActual !== 'apariencia') return;   // el usuario ya se fue a otra sección
 
   $('#vista').innerHTML = `
     <div class="medidores">
@@ -3758,9 +3777,12 @@ async function verHorarios(){
   const grupos = lookups.grupos || [];
 
   if(!grupos.length){
+    if(vistaActual !== 'horarios') return;   // el usuario ya se fue a otra sección
     $('#vista').innerHTML = '<div class="tarjeta"><div class="vacio"><div class="g">▤</div><p>Todavía no hay grupos. Importa primero el archivo de calificaciones.</p></div></div>';
     return;
   }
+
+  if(vistaActual !== 'horarios') return;   // el usuario ya se fue a otra sección
 
   $('#vista').innerHTML = `
     <p style="font-size:13.5px;color:var(--texto-suave);max-width:70ch;margin-bottom:18px">
@@ -3879,6 +3901,8 @@ async function verDocumentos(){
   const porc = Math.min(100, Math.round(mb / LIMITE_MB * 100));
 
   const nombreAl = a => `${a.apellido_paterno} ${a.apellido_materno ?? ''} ${a.nombres}`.trim();
+
+  if(vistaActual !== 'documentos') return;   // el usuario ya se fue a otra sección
 
   $('#vista').innerHTML = `
     <div class="medidores">
@@ -4063,6 +4087,8 @@ async function verReportes(){
                                  orden:'fecha', ascendente:false, limite:800});
   if(!r.ok) throw new Error(r.error);
   const lista = r.datos;
+
+  if(vistaActual !== 'reportes') return;   // el usuario ya se fue a otra sección
 
   $('#vista').innerHTML = `
     <div class="herramientas">
@@ -4967,6 +4993,8 @@ async function verUso(){
   const lista = listas[filtroUso.lista] || listas.no_periodo;
   const etiquetaPeriodo = {hoy:'hoy', '7':'los últimos 7 días', '30':'los últimos 30 días', semestre:'este semestre'}[filtroUso.periodo];
 
+  if(vistaActual !== 'uso') return;   // el usuario ya se fue a otra sección
+
   $('#vista').innerHTML = `
     <div class="herramientas">
       <div class="campo"><label for="uPeriodo">Periodo</label>
@@ -5119,6 +5147,8 @@ async function verAsistencia(){
   const horaSync = est.ultima ? new Date(est.ultima).toLocaleString('es-MX',
     {day:'numeric', month:'short', hour:'2-digit', minute:'2-digit'}) : null;
   const hastaSync = est.hasta ? fecha(est.hasta) : null;
+
+  if(vistaActual !== 'asistencia') return;   // el usuario ya se fue a otra sección
 
   $('#vista').innerHTML = `
     <div class="tarjeta">
@@ -5640,6 +5670,7 @@ function nombreArchivoSeguro(t){
 }
 
 async function verRespaldo(){
+  if(vistaActual !== 'respaldo') return;   // el usuario ya se fue a otra sección
   $('#vista').innerHTML = `
     <p style="font-size:13.5px;color:var(--texto-suave);max-width:70ch;margin-bottom:20px">
       Guarda una copia de la información fuera del sistema. Conviene hacerlo al
@@ -5968,6 +5999,8 @@ async function verCierre(){
 
   cierreSeleccion = [];
 
+  if(vistaActual !== 'cierre') return;   // el usuario ya se fue a otra sección
+
   $('#vista').innerHTML = `
     <div class="recado ojo" style="margin-top:0">
       Esta pantalla modifica datos de forma permanente. Antes de usarla, descarga
@@ -6117,6 +6150,7 @@ function mostrarOpcionesCierre(r){
    MI CONTRASEÑA
    ========================================================================== */
 function verClave(){
+  if(vistaActual !== 'clave') return;   // el usuario ya se fue a otra sección
   $('#vista').innerHTML = `
     <div class="tarjeta" style="max-width:440px">
       <h3>Cambiar mi contraseña</h3>
